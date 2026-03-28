@@ -154,6 +154,8 @@ export default function DemoChatPanel({
   syncPendingDraft,
   onSyncAccept,
   onSyncDismiss,
+  /** 清空对话、重置当前账号画像为「未设置」并清空编辑器草稿（阶段零重来） */
+  onResetPhaseZero,
 }: {
   messages: ChatMessage[]
   topicCards?: TopicCardModel[]
@@ -172,6 +174,7 @@ export default function DemoChatPanel({
   syncPendingDraft?: { title: string } | null
   onSyncAccept?: () => void
   onSyncDismiss?: () => void
+  onResetPhaseZero?: () => void
 }) {
   const [input, setInput] = useState('')
   const [pendingImage, setPendingImage] = useState<string | null>(null)
@@ -214,6 +217,25 @@ export default function DemoChatPanel({
       <div className="shrink-0 border-b border-border-muted px-3 py-2">
         <div className="flex items-center justify-between gap-2">
           <span className="text-sm font-semibold text-text-main">对话</span>
+          {onResetPhaseZero ? (
+            <button
+              type="button"
+              disabled={gatewayError}
+              onClick={() => {
+                if (
+                  !window.confirm(
+                    '将清空本侧对话记录，并把当前账号的领域、人设等恢复为「未设置」，同时清空右侧草稿。网关里的会话记忆不会自动删除；重置后请用欢迎区「新建账号」或第一句话说明你的真实领域。\n\n确定继续？',
+                  )
+                ) {
+                  return
+                }
+                onResetPhaseZero()
+              }}
+              className="shrink-0 rounded-lg border border-border-muted bg-canvas px-2 py-1 text-[11px] font-medium text-text-secondary hover:border-primary/30 hover:text-text-main disabled:opacity-50"
+            >
+              重置阶段0
+            </button>
+          ) : null}
         </div>
         {gatewayError ? (
           <div className="mt-2 rounded-[10px] border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">

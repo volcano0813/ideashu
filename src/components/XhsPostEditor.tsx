@@ -2,7 +2,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useActiveAccount } from '../contexts/ActiveAccountContext'
-import { generateCoverPreview } from '../lib/coverCanvas'
+import {
+  compositeCoverFromImageSource,
+  generateCoverPreview,
+  revokeCoverObjectUrl,
+} from '../lib/coverCanvas'
 import { persistableImageUrl } from '../lib/imageCompress'
 import {
   addStyleSampleFromPost,
@@ -57,6 +61,8 @@ export type QualityScore = {
 
 type Props = {
   stage?: EditorStage
+  /** 与 `json:draft` / 会话恢复对齐；`json:cover` 不应改变，避免整表重置 */
+  draftSessionId?: number
   loadedDraft?: Draft
   originalDraft?: Draft
   originalityReport?: OriginalityReport
@@ -121,6 +127,7 @@ export function calculateRewriteRatio(
 
 export default function XhsPostEditor({
   stage = 1,
+  draftSessionId = 0,
   loadedDraft,
   originalDraft,
   originalityReport,
@@ -249,24 +256,28 @@ export default function XhsPostEditor({
     }
   }, [stage, loadedDraft])
 
-  // Load stage2 draft.
+  const loadedDraftRef = useRef(loadedDraft)
+  loadedDraftRef.current = loadedDraft
+
+  // Load stage2 draft：仅在新的草稿会话（draftSessionId）时整表初始化，不因 `json:cover` 单独到达而重置。
   useEffect(() => {
     if (stage !== 2) return
-    if (!loadedDraft) return
+    const ld = loadedDraftRef.current
+    if (!ld) return
     if (editDebounceTimer.current) window.clearTimeout(editDebounceTimer.current)
     editDebounceTimer.current = null
     pendingEditRef.current = null
 
-    setTitle(loadedDraft.title)
-    setTags(loadedDraft.tags)
+    setTitle(ld.title)
+    setTags(ld.tags)
     setTagInput('')
-    const c0 = loadedDraft.cover
+    const c0 = ld.cover
     setCover(
       c0.imageUrl?.trim()
         ? { ...c0, type: 'photo' }
         : c0,
     )
-    const b0 = normalizeDraftBody(loadedDraft.body)
+    const b0 = normalizeDraftBody(ld.body)
     setBody(b0)
     setOriginalBodySnapshot(b0)
     const now = new Date().toISOString()
@@ -280,23 +291,44 @@ export default function XhsPostEditor({
       coverCompositeObjectUrlRef.current = null
     }
 
-    originalDraftRef.current = loadedDraft
-    originalTitleRef.current = loadedDraft.title
-    originalTagsRef.current = loadedDraft.tags
-    originalBodyRef.current = loadedDraft.body
-    originalCoverRef.current = loadedDraft.cover
+    originalDraftRef.current = ld
+    originalTitleRef.current = ld.title
+    originalTagsRef.current = ld.tags
+    originalBodyRef.current = ld.body
+    originalCoverRef.current = ld.cover
 
     saveDraftSession(activeAccountId, {
       postId: nextPostId,
       stage: 2,
-      originalDraft: loadedDraft,
-      draft: loadedDraft,
+      originalDraft: ld,
+      draft: ld,
       editHistory: [],
       createdAt: now,
       updatedAt: now,
     })
     setOriginalitySessionTick((t) => t + 1)
-  }, [stage, loadedDraft, activeAccountId])
+  }, [stage, draftSessionId, activeAccountId])
+
+  // 同一草稿会话内仅封面字段从父级更新（如晚到的 `json:cover`），不重置 postId / 编辑历史。
+  useEffect(() => {
+    if (stage !== 2) return
+    if (!loadedDraft) return
+    const c0 = loadedDraft.cover
+    setCover((prev) => ({
+      ...prev,
+      type: (c0.type as CoverType) ?? prev.type ?? 'photo',
+      description: c0.description ?? prev.description,
+      overlayText: c0.overlayText ?? prev.overlayText,
+      imageUrl: c0.imageUrl?.trim()?.length ? c0.imageUrl.trim() : prev.imageUrl,
+    }))
+    originalCoverRef.current = loadedDraft.cover
+  }, [
+    stage,
+    loadedDraft?.cover?.imageUrl,
+    loadedDraft?.cover?.overlayText,
+    loadedDraft?.cover?.description,
+    loadedDraft?.cover?.type,
+  ])
 
   // If stage >= 3 and original draft is passed, use it for diff marking.
   useEffect(() => {
@@ -512,7 +544,28 @@ export default function XhsPostEditor({
     const history = applyPendingEditNow()
 
     const id = postId ?? uidForPost()
-    const storedImageUrl = await persistableImageUrl(cover.imageUrl)
+    const rawForBake =
+      cover.imageUrl?.trim() ||
+      loadedDraft?.cover?.imageUrl?.trim() ||
+      ''
+    let storedImageUrl: string | undefined
+    if (
+      rawForBake &&
+      (rawForBake.startsWith('http://') ||
+        rawForBake.startsWith('https://') ||
+        rawForBake.startsWith('data:image/'))
+    ) {
+      const baked = await compositeCoverFromImageSource(rawForBake, cover.overlayText)
+      if (baked) {
+        const u = URL.createObjectURL(baked)
+        storedImageUrl = await persistableImageUrl(u)
+        revokeCoverObjectUrl(u)
+      } else {
+        storedImageUrl = await persistableImageUrl(cover.imageUrl)
+      }
+    } else {
+      storedImageUrl = await persistableImageUrl(cover.imageUrl)
+    }
     const draft: Draft = {
       title,
       body,
@@ -584,8 +637,23 @@ export default function XhsPostEditor({
   }
 
   async function handleDownloadCover() {
-    if (!coverImageFile) return
-    const blob = await generateCoverPreview(coverImageFile, cover.overlayText)
+    const text = cover.overlayText
+    let blob: Blob | null = null
+    if (coverImageFile) {
+      blob = await compositeCoverFromImageSource(coverImageFile, text)
+    } else {
+      const src = loadedDraft?.cover?.imageUrl?.trim() || cover.imageUrl?.trim() || ''
+      if (src.startsWith('http://') || src.startsWith('https://') || src.startsWith('data:image/')) {
+        blob = await compositeCoverFromImageSource(src, text)
+      } else if (src.startsWith('blob:')) {
+        try {
+          const res = await fetch(src)
+          blob = await res.blob()
+        } catch {
+          return
+        }
+      }
+    }
     if (!blob) return
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -598,6 +666,9 @@ export default function XhsPostEditor({
   function renderCoverSlot() {
     const canEdit = stage < 4
     const hasDisplayImage = coverImageFile !== null || !!(cover.imageUrl && cover.imageUrl.trim().length > 0)
+    const canDownloadCover =
+      coverImageFile !== null ||
+      !!(cover.imageUrl?.trim() || loadedDraft?.cover?.imageUrl?.trim())
     const skillCover = loadedDraft?.cover
     const suggestType =
       hasDisplayImage ? ('photo' as CoverType) : (skillCover?.type ?? cover.type)
@@ -691,7 +762,7 @@ export default function XhsPostEditor({
             </label>
             <button
               type="button"
-              disabled={!coverImageFile}
+              disabled={!canDownloadCover}
               onClick={() => void handleDownloadCover()}
               className="rounded-lg border border-border-muted bg-surface px-3 py-1.5 text-[11px] font-semibold text-text-main transition-colors hover:border-primary/40 hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
             >

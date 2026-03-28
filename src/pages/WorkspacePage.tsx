@@ -131,10 +131,14 @@ export default function WorkspacePage() {
   const location = useLocation()
   const navigate = useNavigate()
   const openclaw = sharedOpenclaw
-  const { activeAccount, activeAccountId, patchActiveAccount, accounts, upsertAccountProfile, addAccount } =
+  const { activeAccount, activeAccountId, patchActiveAccount, accounts, upsertAccountProfile } =
     useActiveAccount()
 
   const syncedAccountNamesRef = useRef<Set<string>>(new Set())
+
+  useEffect(() => {
+    syncedAccountNamesRef.current.clear()
+  }, [activeAccountId])
 
   function stripMarkdownDecorations(raw: string): string {
     let s = stripAccountNameAsterisks(raw ?? '')
@@ -276,90 +280,26 @@ export default function WorkspacePage() {
     return [...merged.values()]
   }
 
-  function extractAccountNamesFromAssistantText(text: string): string[] {
-    const s = (text ?? '').replace(/\r\n/g, '\n')
-    if (!s.trim()) return []
-
-    // Strong gate: only attempt when the message is very likely about account configuration.
-    const gate =
-      /账号配置|已有配置|新建账号|账号\s*清单|账号\s*列表|领域|状态/.test(s) && /账号/.test(s)
-    if (!gate) return []
-
-    const out: string[] = []
-    const push = (name: string) => {
-      const n = stripMarkdownDecorations(name)
-      if (n.length < 2) return
-      if (['账号', '领域', '状态', '完成', '已有配置'].includes(n)) return
-      out.push(n)
-    }
-
-    const lines = s
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean)
-
-    // 1) Markdown table: lines containing pipes.
-    const headerIdx = lines.findIndex((l) => l.includes('|') && l.includes('账号') && l.includes('领域'))
-    if (headerIdx >= 0) {
-      for (let i = headerIdx + 1; i < Math.min(lines.length, headerIdx + 12); i++) {
-        const l = lines[i]!
-        if (!l.includes('|')) continue
-        if (/---/.test(l)) continue
-        const cells = l.split('|').map((c) => c.trim()).filter((c) => c.length > 0)
-        const nameCell = cells[0]
-        if (nameCell) push(nameCell)
-      }
-    }
-
-    // 2) Plain text rows: a "账号 领域 状态" header then rows below.
-    const plainHeaderIdx = lines.findIndex(
-      (l) => !l.includes('|') && /账号/.test(l) && /领域/.test(l) && /状态/.test(l),
-    )
-    if (plainHeaderIdx >= 0) {
-      for (let i = plainHeaderIdx + 1; i < Math.min(lines.length, plainHeaderIdx + 12); i++) {
-        const l = lines[i]!
-        if (/^[-—_]{3,}$/.test(l)) continue
-        if (/配置完成|已有配置|检测到重复指令/.test(l)) continue
-        // Example: "Elia的AI实践 AI工具与产品实践 ✅ 20:02 完成"
-        const m = l.match(/^(\S{2,40})\s+/)
-        if (m?.[1]) push(m[1])
-      }
-    }
-
-    // 3) Fallback: "账号：xxx"
-    const re = /账号[:：]\s*([^\n，。]{2,40})/g
-    let m: RegExpExecArray | null
-    while ((m = re.exec(s)) !== null) {
-      push(m[1] ?? '')
-    }
-
-    return [...new Set(out)]
-  }
-
   function syncAccountsFromAssistantText(text: string) {
     const profiles = extractAccountProfilesFromAssistantText(text)
     const existingNames = new Set(accounts.map((a) => stripMarkdownDecorations(a.name)))
+    const activeName = stripMarkdownDecorations(activeAccount.name)
 
     if (profiles.length > 0) {
       for (const p of profiles) {
-        const name = stripMarkdownDecorations(p.name)
-        if (!name) continue
-        // Prevent repeated writes on the same assistant bubble updates.
-        if (syncedAccountNamesRef.current.has(name)) continue
-        syncedAccountNamesRef.current.add(name)
-        upsertAccountProfile({ ...p, name })
+        const parsedName = stripMarkdownDecorations(p.name)
+        if (!parsedName) continue
+        const targetName = existingNames.has(parsedName) ? parsedName : activeName
+        const dedupeKey =
+          targetName === parsedName ? parsedName : `${activeAccountId}:into-active:${parsedName}`
+        if (syncedAccountNamesRef.current.has(dedupeKey)) continue
+        syncedAccountNamesRef.current.add(dedupeKey)
+        upsertAccountProfile({ ...p, name: targetName })
       }
       return
     }
 
-    // Fallback: still support name-only extraction.
-    const names = extractAccountNamesFromAssistantText(text)
-    for (const name of names) {
-      if (existingNames.has(name)) continue
-      if (syncedAccountNamesRef.current.has(name)) continue
-      syncedAccountNamesRef.current.add(name)
-      addAccount(name)
-    }
+    // 不再从助手纯文本里自动新建账号：未识别的名称易与当前 TopNav 账号不一致；有结构化字段时走上方 profile 并合并到当前账号。
   }
 
   const [topicCards, setTopicCards] = useState<TopicCardModel[]>([])
@@ -367,6 +307,8 @@ export default function WorkspacePage() {
   const [connectAttempted, setConnectAttempted] = useState(false)
 
   const [loadedDraft, setLoadedDraft] = useState<Draft | undefined>(undefined)
+  /** Bumps only on new `json:draft` (or session restore), not on `json:cover` — keeps XhsPostEditor from resetting on late cover. */
+  const [draftSessionId, setDraftSessionId] = useState(0)
   const [originalDraft, setOriginalDraft] = useState<Draft | undefined>(undefined)
   const [qualityScore, setQualityScore] = useState<QualityScore | undefined>(undefined)
   const [originalityReport, setOriginalityReport] = useState<OriginalityReport | undefined>(undefined)
@@ -432,10 +374,33 @@ export default function WorkspacePage() {
     clearDraftSession(activeAccountId)
     currentDraftRef.current = undefined
     lastLocalImageDataUrlRef.current = null
+    setDraftSessionId((n) => n + 1)
     setLoadedDraft(undefined)
     setOriginalDraft(undefined)
     setQualityScore(undefined)
     setOriginalityReport(undefined)
+  }
+
+  function resetPhaseZeroConfiguration() {
+    replyIdToMsgIdRef.current.clear()
+    msgId.current = 1
+    setMessages([])
+    setTopicCards([])
+    hasDraftInCurrentRoundRef.current = false
+    openclaw.resetAssistantStreamState()
+    patchActiveAccount({
+      domain: '未设置',
+      persona: '未设置',
+      styleName: '默认',
+      catchPhrases: [],
+      tone: '',
+      learnedRules: 0,
+      trendSources: 0,
+      hasAnalyzedStyle: false,
+      styleAnalysisCount: 0,
+      cumulativeEditCount: 0,
+    })
+    resetDraftSession()
   }
 
   useLayoutEffect(() => {
@@ -531,6 +496,7 @@ export default function WorkspacePage() {
         const finalized = injectedDraft.status === 'finalized'
 
         if (finalized) {
+          setDraftSessionId((n) => n + 1)
           currentDraftRef.current = injectedDraft
           setLoadedDraft(injectedDraft)
           setOriginalDraft((prev) => prev ?? injectedDraft)
@@ -539,6 +505,7 @@ export default function WorkspacePage() {
 
         if (!draftHasMeaningfulContent(injectedDraft)) return
 
+        setDraftSessionId((n) => n + 1)
         currentDraftRef.current = injectedDraft
         setLoadedDraft(injectedDraft)
         setOriginalDraft((prev) => prev ?? injectedDraft)
@@ -634,6 +601,7 @@ export default function WorkspacePage() {
         imageDataUrl: options.imageDataUrl,
         topicTags: ['聊天附带'],
       })
+      // 与飞书不同：网页网关当前只传文字。服务端要对用户图做 Kolors img2img 需网关传图或可被 Skill 拉取的临时 URL。
       wireText = trimmed
         ? `${trimmed}\n\n【本地素材库已保存图片：${mat.id}】（网关仅传输文字；画面已写入本机「素材银行」）`
         : `【本地素材库已保存图片：${mat.id}】请结合我上传的画面继续引导。（网关仅传输文字；画面已写入本机「素材银行」）`
@@ -705,6 +673,7 @@ export default function WorkspacePage() {
 
     const pending = consumePendingDraft(activeAccountId)
     if (pending && draftHasMeaningfulContent(pending)) {
+      setDraftSessionId((n) => n + 1)
       setLoadedDraft(pending)
       setOriginalDraft(pending)
       setQualityScore(undefined)
@@ -713,6 +682,7 @@ export default function WorkspacePage() {
     }
     const session = loadDraftSession(activeAccountId)
     if (!session) return
+    setDraftSessionId((n) => n + 1)
     setLoadedDraft(session.draft)
     setOriginalDraft(session.originalDraft)
   }, [activeAccountId])
@@ -763,12 +733,14 @@ export default function WorkspacePage() {
             sending={sending}
             gatewayError={connectAttempted && !gatewayReady}
             accountName={activeAccount.name}
+            onResetPhaseZero={resetPhaseZeroConfiguration}
           />
         </aside>
 
         <section className="min-h-0 flex-1 overflow-hidden rounded-xl border border-border-muted bg-surface">
           <XhsPostEditor
             stage={editorStage}
+            draftSessionId={draftSessionId}
             loadedDraft={loadedDraft}
             originalDraft={originalDraft}
             originalityReport={originalityReport}

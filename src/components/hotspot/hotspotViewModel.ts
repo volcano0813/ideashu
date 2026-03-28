@@ -1,27 +1,13 @@
 import type { TrendSignal } from '../../lib/openclawClient'
 import type { HotTopic, HotTopicType, HotTrend } from '../../types/hotspot'
 
-const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000
-
-/** 统一展示：列表层硬窗口为近 3 天；抓取提示里另要求模型优先近 24h */
+/** 统一展示文案；近 3 天由抓取提示约束模型，列表不按 publishedAt 硬裁 */
 function normalizeHotspotWindowLabel(detail: string | undefined): string {
   const d = (detail ?? '').trim()
   if (!d) return '热点窗口 3 天内'
   return d
     .replace(/\s*3\s*[-–~～]\s*7\s*天/g, '3 天内')
     .replace(/3\s*[-–]\s*7\s*天/g, '3 天内')
-}
-
-/** 列表层：仅保留「近 3 天内」可核对发布时间的选题（常青除外；无 publishedAt 时仍展示以免列表被清空） */
-export function trendSignalInThreeDayWindow(sig: TrendSignal): boolean {
-  if (sig.timing === 'evergreen') return true
-  const iso = typeof sig.publishedAt === 'string' ? sig.publishedAt.trim() : ''
-  if (!iso) return true
-  const t = new Date(iso).getTime()
-  if (!Number.isFinite(t)) return true
-  const age = Date.now() - t
-  if (age < 0) return true
-  return age <= THREE_DAYS_MS
 }
 
 function clamp(n: number, min: number, max: number) {

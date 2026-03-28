@@ -4,10 +4,14 @@ import {
   invalidateOpenClawConnectPromise,
   openclaw,
 } from '../lib/openclawSingleton'
-import { parseTopicsFromAssistantRaw, type TrendSignal } from '../lib/openclawClient'
+import {
+  looksLikeTopicsJsonPendingMore,
+  parseTopicsFromAssistantRaw,
+  type TrendSignal,
+} from '../lib/openclawClient'
 import FilterBar, { type HotspotSortKey } from '../components/hotspot/FilterBar'
 import HotCard from '../components/hotspot/HotCard'
-import { hotTopicFromTrendSignal, trendSignalInThreeDayWindow } from '../components/hotspot/hotspotViewModel'
+import { hotTopicFromTrendSignal } from '../components/hotspot/hotspotViewModel'
 import { useActiveAccount } from '../contexts/ActiveAccountContext'
 import type { HotTopic } from '../types/hotspot'
 
@@ -119,6 +123,8 @@ export default function HotspotPage() {
   const fetchTimeoutRef = useRef<number | null>(null)
   /** True after send「找热点」until we get topics (event) or parse from assistant_reply. */
   const hotspotAwaitingTopicsRef = useRef(false)
+  /** 本次「立即抓取」进行中：用此拒绝其它会话的迟滞 topics，但不在首帧 assistant_reply 失败时过早关掉（避免错过后续 chat+message） */
+  const hotspotFetchSendingRef = useRef(false)
 
   const [activeCategory, setActiveCategory] = useState<string>('all')
   const [sortKey, setSortKey] = useState<HotspotSortKey>('time')
@@ -159,6 +165,7 @@ export default function HotspotPage() {
     setSending(false)
     clearFetchTimeout()
     hotspotAwaitingTopicsRef.current = false
+    hotspotFetchSendingRef.current = false
     let cancelled = false
     void ensureOpenClawConnected().finally(() => {
       if (cancelled) return
@@ -192,6 +199,7 @@ export default function HotspotPage() {
     setFetchError(null)
     setDeviceAuthOk(null)
     hotspotAwaitingTopicsRef.current = false
+    hotspotFetchSendingRef.current = false
     setConnectAttempted(false)
     invalidateOpenClawConnectPromise()
     openclaw.disconnect()
@@ -201,9 +209,9 @@ export default function HotspotPage() {
   useEffect(() => {
     const unsub = openclaw.onEvent((evt) => {
       if (evt.type === 'topics') {
-        // 忽略非本轮「立即抓取」产生的 topics（如其它页、或切换账号前的迟滞事件）
-        if (!hotspotAwaitingTopicsRef.current) return
+        if (!hotspotFetchSendingRef.current) return
         hotspotAwaitingTopicsRef.current = false
+        hotspotFetchSendingRef.current = false
         clearFetchTimeout()
         setFetchError(null)
         setSignals(evt.topics)
@@ -213,10 +221,11 @@ export default function HotspotPage() {
         setSending(false)
         return
       }
-      if (evt.type === 'assistant_reply' && hotspotAwaitingTopicsRef.current) {
+      if (evt.type === 'assistant_reply' && hotspotFetchSendingRef.current) {
         const parsed = parseTopicsFromAssistantRaw(evt.rawFull ?? evt.text)
         if (parsed && parsed.length > 0) {
           hotspotAwaitingTopicsRef.current = false
+          hotspotFetchSendingRef.current = false
           clearFetchTimeout()
           setFetchError(null)
           setSignals(parsed)
@@ -230,7 +239,12 @@ export default function HotspotPage() {
             hotspotAwaitingTopicsRef.current = true
             return
           }
+          if (looksLikeTopicsJsonPendingMore(raw)) {
+            hotspotAwaitingTopicsRef.current = true
+            return
+          }
           hotspotAwaitingTopicsRef.current = false
+          hotspotFetchSendingRef.current = false
           clearFetchTimeout()
           setSending(false)
           setFetchError(
@@ -257,6 +271,7 @@ export default function HotspotPage() {
     fetchTimeoutRef.current = window.setTimeout(() => {
       fetchTimeoutRef.current = null
       hotspotAwaitingTopicsRef.current = false
+      hotspotFetchSendingRef.current = false
       setSending((cur) => {
         if (!cur) return cur
         setFetchError(
@@ -266,6 +281,7 @@ export default function HotspotPage() {
       })
     }, 90_000)
     hotspotAwaitingTopicsRef.current = true
+    hotspotFetchSendingRef.current = true
     setSending(true)
     const dRaw = (activeAccount.domain ?? '').trim()
     const d = dRaw.replace(/^\s*(领域|domain)\s*[:：=]\s*/i, '')
@@ -277,6 +293,7 @@ export default function HotspotPage() {
     if (!sent) {
       clearFetchTimeout()
       hotspotAwaitingTopicsRef.current = false
+      hotspotFetchSendingRef.current = false
       setSending(false)
       setFetchError('网关未就绪，抓取请求未发出。请稍后重试，或点击「重新连接网关」。')
     }
@@ -293,7 +310,7 @@ export default function HotspotPage() {
     return [{ key: 'all', label: '全部' }, ...fromDomain]
   }, [activeAccount.domain])
 
-  const signalsForUi = useMemo(() => signals.filter(trendSignalInThreeDayWindow), [signals])
+  const signalsForUi = signals
 
   const topics: HotTopic[] = useMemo(() => {
     const at = fetchedAt ?? new Date().toISOString()
@@ -407,10 +424,8 @@ export default function HotspotPage() {
                   fetchError
                 ) : signals.length === 0 ? (
                   '还没有热点结果。'
-                ) : signalsForUi.length === 0 ? (
-                  '近 3 天窗口：当前结果里没有落在 3 天内的条目。请重试抓取，并让助手优先 24h 内热点、每条补充 publishedAt。'
                 ) : (
-                  '没有符合筛选条件的热点。'
+                  '没有符合筛选条件的热点（或已全部点过「不感兴趣」）。'
                 )}
               </div>
             ) : null}

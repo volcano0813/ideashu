@@ -112,7 +112,9 @@ function finishTopicsWithTraceableFilter(norm: TrendSignal[] | null): TrendSigna
   if (strict.length > 0) return strict
   // 助手常漏填 sourceUrl：宁可展示无链接卡片（HotCard 内提示补链），也不要整页失败
   const relaxed = norm.filter((s) => !isHotspotMetaLimitationSignal(s))
-  return relaxed.length > 0 ? relaxed : null
+  if (relaxed.length > 0) return relaxed
+  // 若每条都被判为「限制说明」等（正则误判常见），仍返回原始列表，避免控制台已解析出 topics 但 UI 整页失败
+  return norm
 }
 
 export type StyleRule = {
@@ -124,7 +126,10 @@ export type StyleRule = {
   createdAt: string
 }
 
-/** ideashu-v5 `json:cover` after Kolors (SiliconFlow) image generation */
+/**
+ * ideashu-v5 `json:cover` after Kolors (SiliconFlow) image generation.
+ * Skill 应输出：` ```json:cover\n{ "mode":"text2img"|"img2img", "imageUrl":"<https URL 或 data:image/...>", "overlayText":"..." }\n``` `
+ */
 export type CoverPayload = {
   mode: 'text2img' | 'img2img'
   imageUrl: string
@@ -303,13 +308,18 @@ function collapseConsecutiveDuplicateParagraphs(s: string, minBlockChars = 45): 
 
 function extractTaggedJSON(raw: string, tag: string): unknown | null {
   const plain = `json:${tag}`
+  const plainFullwidth = `json：${tag}`
   const fenced = `\`\`\`${plain}`
   let idx = raw.indexOf(plain)
   let skip = plain.length
   if (idx < 0) {
+    idx = raw.indexOf(plainFullwidth)
+    if (idx >= 0) skip = plainFullwidth.length
+  }
+  if (idx < 0) {
     idx = raw.indexOf(fenced)
     if (idx < 0) {
-      const flex = new RegExp(`json\\s*:\\s*${escapeRegExp(tag)}`, 'i')
+      const flex = new RegExp(`json\\s*[：:]\\s*${escapeRegExp(tag)}`, 'i')
       const m = flex.exec(raw)
       if (m) {
         idx = m.index
@@ -429,6 +439,9 @@ function extractJsonBlocks(text: string): Record<string, unknown> {
     /```json:(\w+)\s*([\s\S]*?)```/g,
     /```\s*json\s*:\s*(\w+)\s*\n([\s\S]*?)```/gi,
     /```\s*json\s*:\s*(\w+)\s*([\s\S]*?)```/gi,
+    // 全角冒号、或标签与换行之间仅有空白
+    /```\s*json\s*[：:]\s*(\w+)\s*\r?\n([\s\S]*?)```/gi,
+    /```\s*json\s*[：:]\s*(\w+)\s+([\s\S]*?)```/gi,
   ]
   for (const regex of patterns) {
     regex.lastIndex = 0
@@ -922,6 +935,20 @@ function normalizeTrendSignals(raw: unknown): TrendSignal[] | null {
   })
 }
 
+/**
+ * 已出现 json:topics 且围栏闭合，但当前仍抽不出 topics JSON（常见于网关连发多帧 chat+message，首帧只有前文、下一帧才补全代码块）。
+ * 此时不应判为终态失败，应等后续帧或超时。
+ */
+export function looksLikeTopicsJsonPendingMore(raw: string): boolean {
+  if (!/json:topics/i.test(raw)) return false
+  const fences = raw.match(/```/g)
+  if (!fences || fences.length % 2 !== 0) return true
+  if (extractJsonBlocks(raw).topics !== undefined) return false
+  if (extractTaggedJSON(raw, 'topics') != null) return false
+  if (extractBareJsonTopicsArray(raw) != null) return false
+  return true
+}
+
 /** Hotspot / UI fallback when `topics` event was not emitted but prose still contains machine JSON. */
 export function parseTopicsFromAssistantRaw(raw: string): TrendSignal[] | null {
   const blocks = extractJsonBlocks(raw)
@@ -1059,12 +1086,29 @@ function normalizeCoverPayload(raw: unknown): CoverPayload | null {
   if (!raw || typeof raw !== 'object') return null
   const o = raw as Record<string, unknown>
   const imageUrl = typeof o.imageUrl === 'string' ? o.imageUrl.trim() : ''
-  if (!imageUrl) return null
-  try {
-    const u = new URL(imageUrl)
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
-  } catch {
+  if (!imageUrl) {
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line no-console
+      console.warn('[openclawClient] json:cover skipped: missing imageUrl')
+    }
     return null
+  }
+  const isDataImage = imageUrl.startsWith('data:image/')
+  let httpOk = false
+  if (!isDataImage) {
+    try {
+      const u = new URL(imageUrl)
+      httpOk = u.protocol === 'http:' || u.protocol === 'https:'
+    } catch {
+      httpOk = false
+    }
+    if (!httpOk) {
+      if (import.meta.env.DEV) {
+        // eslint-disable-next-line no-console
+        console.warn('[openclawClient] json:cover skipped: invalid imageUrl', imageUrl.slice(0, 96))
+      }
+      return null
+    }
   }
   const modeRaw = String(o.mode ?? '')
   const mode: CoverPayload['mode'] = modeRaw === 'img2img' ? 'img2img' : 'text2img'
@@ -1232,7 +1276,8 @@ export function createOpenClawClient({
    * 2s 空闲会误把开场白当终态 flush 掉，导致 json:topics 永远进不了同一次 parse。
    */
   let agentIdleFlushTimer: number | null = null
-  const AGENT_IDLE_FLUSH_MS = 18_000
+  /** Longer pause avoids treating mid-tool-call silence as end-of-message (still capped by AGENT_STREAM_FORCE_FLUSH_MS). */
+  const AGENT_IDLE_FLUSH_MS = 60_000
   const AGENT_STREAM_FORCE_FLUSH_MS = 120_000
 
   function clearAgentIdleFlushTimer() {
@@ -1402,7 +1447,9 @@ export function createOpenClawClient({
       // eslint-disable-next-line no-console
       console.log('[openclawClient] json text preview:', text.slice(0, 240))
     }
-    const rid = replyId ?? activeAssistantReplyId ?? `${sessionKey ?? 'nosession'}::fb_${fallbackAssistantReplySeq++}`
+    const rid =
+      activeAssistantReplyId ?? replyId ?? `${sessionKey ?? 'nosession'}::fb_${fallbackAssistantReplySeq++}`
+    if (activeAssistantReplyId == null) activeAssistantReplyId = rid
     emitAssistantParse(text, rid)
   }
 
@@ -1412,7 +1459,9 @@ export function createOpenClawClient({
     messageBuffer = ''
     agentStreamFirstChunkAt = null
     if (!text.trim()) return
-    const rid = replyId ?? activeAssistantReplyId ?? `${sessionKey ?? 'nosession'}::fb_${fallbackAssistantReplySeq++}`
+    const rid =
+      activeAssistantReplyId ?? replyId ?? `${sessionKey ?? 'nosession'}::fb_${fallbackAssistantReplySeq++}`
+    if (activeAssistantReplyId == null) activeAssistantReplyId = rid
     const emitted = emitAssistantParse(text, rid)
     if (!emitted) return
     if (import.meta.env.DEV) {
@@ -1825,7 +1874,7 @@ export function createOpenClawClient({
             if (messageBuffer.trim().length > 0 && agentStreamFirstChunkAt == null) {
               agentStreamFirstChunkAt = Date.now()
             }
-            if (wasEmpty) {
+            if (wasEmpty && activeAssistantReplyId == null) {
               const derived = deriveReplyIdFromPayload(payload)
               activeAssistantReplyId =
                 derived ??
