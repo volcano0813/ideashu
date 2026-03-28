@@ -24,9 +24,19 @@ export type WelcomeAction = {
   id: string
   label: string
   hint?: string
-  /** 发往网关的完整用户消息 */
+  /** 发往网关的完整用户消息（仅 __NAVIGATE__ 前缀走路由跳转） */
   send: string
 }
+
+export type WorkflowMode =
+  | 'idle'
+  | 'hot_fetch'
+  | 'store_material'
+  | 'polish_draft'
+  | 'write_full'
+  | 'new_account'
+  | 'awaiting_draft'
+  | 'editing'
 
 const DEFAULT_ACCOUNT_NAME = '每日一杯'
 
@@ -54,13 +64,13 @@ const DEFAULT_WELCOME_ACTIONS: WelcomeAction[] = [
     id: 'polish_draft',
     label: '✏️ 帮我改',
     hint: '你有粗稿，我来润色',
-    send: '我已有粗稿，请帮我润色成适合小红书发布的笔记，可结合 ideashu-v5 skill。',
+    send: '',
   },
   {
     id: 'write_full',
     label: '📝 帮我写',
     hint: '从选题开始，我辅助你创作',
-    send: '用 ideashu-v5 skill 帮我写',
+    send: '',
   },
   {
     id: 'new_account',
@@ -70,7 +80,6 @@ const DEFAULT_WELCOME_ACTIONS: WelcomeAction[] = [
   },
 ]
 
-// Ensure JSON machine blocks never render into chat bubbles (even if upstream stripping missed).
 function stripJsonBlocks(text: string): string {
   return text
     .replace(/```json:\w+\s*[\s\S]*?```/g, '')
@@ -93,38 +102,94 @@ function MarkdownBubble({ text, role }: { text: string; role: 'user' | 'agent' }
   return <div className={base} dangerouslySetInnerHTML={{ __html: html }} />
 }
 
+/** 飞书同步来稿确认弹窗 */
+function SyncDraftConfirm({
+  title,
+  onAccept,
+  onDismiss,
+}: {
+  title: string
+  onAccept: () => void
+  onDismiss: () => void
+}) {
+  return (
+    <div className="mx-1 my-1.5 rounded-[12px] border border-blue-200 bg-blue-50 px-3.5 py-2.5 shadow-sm">
+      <div className="text-[12px] font-semibold text-blue-900">📡 飞书同步</div>
+      <div className="mt-1 text-[12px] text-blue-800">
+        收到新草稿：<strong>{title || '未命名'}</strong>
+      </div>
+      <div className="mt-0.5 text-[11px] text-blue-600">是否加载到编辑器？当前编辑内容会被替换。</div>
+      <div className="mt-2 flex gap-2">
+        <button
+          type="button"
+          onClick={onAccept}
+          className="rounded-lg bg-blue-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
+        >
+          加载
+        </button>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="rounded-lg border border-blue-200 bg-white px-3 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-50"
+        >
+          忽略
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export default function DemoChatPanel({
   messages,
   topicCards,
   onSend,
+  onAction,
+  onSelectTopic,
   sending = false,
   gatewayError = false,
   accountName = DEFAULT_ACCOUNT_NAME,
   welcomeLead = DEFAULT_WELCOME_LEAD,
   welcomeActions = DEFAULT_WELCOME_ACTIONS,
+  workflowMode = 'idle',
+  syncPendingDraft,
+  onSyncAccept,
+  onSyncDismiss,
 }: {
   messages: ChatMessage[]
   topicCards?: TopicCardModel[]
   onSend: (text: string, options?: { imageDataUrl?: string }) => void
+  /** 欢迎页按钮点击：传 actionId，由父组件决定行为 */
+  onAction?: (actionId: string) => void
+  /** 选题卡片点击：传结构化数据 + 索引 */
+  onSelectTopic?: (topic: TopicCardModel, index: number) => void
   sending?: boolean
   gatewayError?: boolean
-  /** 当前创作账号展示名 */
   accountName?: string
-  /** 首屏欢迎区多行正文 */
   welcomeLead?: string
   welcomeActions?: WelcomeAction[]
+  workflowMode?: WorkflowMode
+  /** 飞书同步待确认草稿 */
+  syncPendingDraft?: { title: string } | null
+  onSyncAccept?: () => void
+  onSyncDismiss?: () => void
 }) {
   const [input, setInput] = useState('')
   const [pendingImage, setPendingImage] = useState<string | null>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
 
-  function handleWelcomeActionSend(send: string) {
-    if (send.startsWith('__NAVIGATE__/')) {
-      navigate(send.replace('__NAVIGATE__', ''))
+  function handleWelcomeActionClick(action: WelcomeAction) {
+    if (action.send.startsWith('__NAVIGATE__/')) {
+      navigate(action.send.replace('__NAVIGATE__', ''))
       return
     }
-    onSend(send)
+    if (onAction) {
+      onAction(action.id)
+      return
+    }
+    if (action.send) {
+      onSend(action.send)
+    }
   }
 
   function submit() {
@@ -134,6 +199,14 @@ export default function DemoChatPanel({
     setInput('')
     setPendingImage(null)
     onSend(t, { imageDataUrl: img ?? undefined })
+  }
+
+  function getPlaceholder(): string {
+    if (gatewayError) return '网关未连接'
+    if (workflowMode === 'polish_draft') return '在这里粘贴你的粗稿，按 Enter 发送给我润色'
+    if (workflowMode === 'awaiting_draft') return 'AI 正在生成，请稍候...'
+    if (messages.length === 0) return '可选：需要时在此输入补充说明'
+    return '输入消息…（Enter 发送）'
   }
 
   return (
@@ -166,7 +239,7 @@ export default function DemoChatPanel({
                   key={a.id}
                   type="button"
                   disabled={gatewayError || sending}
-                  onClick={() => handleWelcomeActionSend(a.send)}
+                  onClick={() => handleWelcomeActionClick(a)}
                   className="w-full rounded-[12px] border border-border-muted bg-canvas px-3.5 py-2.5 text-left text-text-main shadow-sm transition-colors hover:border-primary/30 hover:bg-surface active:scale-[0.99] disabled:opacity-50 disabled:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-1"
                 >
                   <div className="text-[13px] font-semibold text-text-main">{a.label}</div>
@@ -178,12 +251,7 @@ export default function DemoChatPanel({
         ) : null}
 
         {messages.map((m) => (
-          <div
-            key={m.id}
-            className={
-              m.role === 'user' ? 'flex justify-end' : 'flex justify-start'
-            }
-          >
+          <div key={m.id} className={m.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
             <div
               className={
                 m.role === 'user'
@@ -199,11 +267,7 @@ export default function DemoChatPanel({
                 <>
                   {m.localImageDataUrl ? (
                     <div className="mb-2 overflow-hidden rounded-[10px] border border-white/25">
-                      <img
-                        src={m.localImageDataUrl}
-                        alt=""
-                        className="max-h-48 w-full max-w-[260px] object-cover"
-                      />
+                      <img src={m.localImageDataUrl} alt="" className="max-h-48 w-full max-w-[260px] object-cover" />
                     </div>
                   ) : null}
                   {m.content?.trim() ? (
@@ -211,7 +275,6 @@ export default function DemoChatPanel({
                   ) : null}
                 </>
               )}
-
               {m.loading ? (
                 <div
                   className={
@@ -235,12 +298,16 @@ export default function DemoChatPanel({
           </div>
         ))}
 
+        {/* 飞书同步确认 */}
+        {syncPendingDraft && onSyncAccept && onSyncDismiss ? (
+          <SyncDraftConfirm title={syncPendingDraft.title} onAccept={onSyncAccept} onDismiss={onSyncDismiss} />
+        ) : null}
+
+        {/* 选题卡片 */}
         {topicCards && topicCards.length > 0 ? (
           <div className="space-y-1.5 rounded-lg border border-border-muted bg-surface p-2">
             <div className="text-[12px] font-semibold text-text-main">请选择方向</div>
-            <p className="-mt-0.5 text-[10px] text-text-tertiary">
-              点击下方卡片即可发送对应选题，无需再复制 JSON。
-            </p>
+            <p className="-mt-0.5 text-[10px] text-text-tertiary">点击下方卡片即可选择对应选题。</p>
             <div className="flex flex-col gap-1.5">
               {topicCards.map((t, idx) => (
                 <button
@@ -248,7 +315,11 @@ export default function DemoChatPanel({
                   type="button"
                   disabled={gatewayError || sending}
                   onClick={() => {
-                    onSend(`选方向${idx + 1}：${t.title}`)
+                    if (onSelectTopic) {
+                      onSelectTopic(t, idx)
+                    } else {
+                      onSend(`选方向${idx + 1}：${t.title}`)
+                    }
                   }}
                   className="text-left w-full rounded-[10px] border border-transparent bg-[#F8F8F8] px-3.5 py-2.5 transition-colors hover:bg-[#f0f0f0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 disabled:opacity-50"
                 >
@@ -257,18 +328,13 @@ export default function DemoChatPanel({
                       {idx + 1}. {t.title}
                     </span>
                     {t.recommended ? (
-                      <span
-                        className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-primary/10 text-primary"
-                        title="素材匹配"
-                      >
+                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-primary/10 text-primary" title="素材匹配">
                         推荐
                       </span>
                     ) : null}
                   </div>
                   {t.description ? (
-                    <div className="text-[11px] text-text-tertiary mt-1 line-clamp-3 leading-snug">
-                      {t.description}
-                    </div>
+                    <div className="text-[11px] text-text-tertiary mt-1 line-clamp-3 leading-snug">{t.description}</div>
                   ) : null}
                 </button>
               ))}
@@ -277,6 +343,7 @@ export default function DemoChatPanel({
         ) : null}
       </div>
 
+      {/* 输入区 */}
       <div className="shrink-0 border-t border-border-muted px-3 py-2">
         {pendingImage ? (
           <div className="mb-2 flex items-start gap-2 rounded-xl border border-border-muted bg-canvas p-2">
@@ -335,20 +402,14 @@ export default function DemoChatPanel({
               }
             }}
             rows={1}
-            placeholder={
-              gatewayError
-                ? '网关未连接'
-                : messages.length === 0
-                  ? '可选：需要时在此输入补充说明'
-                  : '输入消息…（Enter 发送）'
-            }
-            disabled={!!gatewayError || sending}
+            placeholder={getPlaceholder()}
+            disabled={!!gatewayError || sending || workflowMode === 'awaiting_draft'}
             className="min-h-[36px] max-h-20 flex-1 resize-none rounded-3xl border-[1.5px] border-border-muted bg-canvas px-3 py-2 text-[13px] text-text-main outline-none transition-colors placeholder:text-text-tertiary focus:border-primary disabled:opacity-60"
           />
           <button
             type="button"
             onClick={submit}
-            disabled={!!gatewayError || sending || (!input.trim() && !pendingImage)}
+            disabled={!!gatewayError || sending || (!input.trim() && !pendingImage) || workflowMode === 'awaiting_draft'}
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary text-white transition-colors hover:bg-primary/90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2"
             aria-label="发送"
           >

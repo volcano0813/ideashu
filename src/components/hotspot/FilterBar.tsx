@@ -40,9 +40,9 @@ export default function FilterBar({
           type="button"
           onClick={() => onChangeSort(sortKey === 'heat' ? 'time' : 'heat')}
           className="px-3 py-1.5 rounded-lg bg-surface text-[12px] font-bold text-text-secondary border border-border-muted hover:border-text-main/15 hover:bg-canvas transition-colors whitespace-nowrap"
-          title="切换排序：热度 / 时间"
+          title="切换排序：热度 / 发布时间（越新越前，优先 24h 内）"
         >
-          {sortKey === 'heat' ? '按热度排序 ↓' : '按时间排序 ↓'}
+          {sortKey === 'heat' ? '按热度排序 ↓' : '按发布时间 ↓'}
         </button>
       </div>
     </div>

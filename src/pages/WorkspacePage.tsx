@@ -32,6 +32,60 @@ function isTopicsMachinePayload(text: string): boolean {
   return /```json:topics\b/i.test(s) || /\bjson:topics\b/i.test(s)
 }
 
+/**
+ * 修复 Skill 返回的"一句一行"格式。
+ * 只合并明显的"诗歌格式"（段内连续 3+ 行都是短句），保留有意的短段落。
+ */
+function mergeShortLinesToParagraphs(body: string): string {
+  if (!body) return body
+  // 按段落分隔（两个及以上换行）
+  const paragraphs = body.split(/\n{2,}/)
+
+  const merged = paragraphs.map((para) => {
+    const lines = para.split('\n').map((l) => l.trim()).filter(Boolean)
+    if (lines.length <= 2) return lines.join('\n')
+
+    // 检测连续短行（<25字）的段落——这是典型的"一句一行"
+    const shortLines = lines.filter((l) => l.length < 25)
+    // 只有超过 70% 的行都是短句，且连续短行 >= 3，才认为需要合并
+    if (shortLines.length < lines.length * 0.7 || lines.length < 3) {
+      return lines.join('\n')
+    }
+
+    // 合并短行，但遇到语义转折点时分段
+    const groups: string[][] = [[]]
+    for (const line of lines) {
+      const currentGroup = groups[groups.length - 1]
+      // 如果当前组已经有 3-4 句了，开新段
+      if (currentGroup.length >= 4) {
+        groups.push([line])
+      } else {
+        currentGroup.push(line)
+      }
+    }
+
+    return groups
+      .map((group) => {
+        if (group.length <= 1) return group.join('')
+        let result = group[0]
+        for (let i = 1; i < group.length; i++) {
+          const lastChar = result[result.length - 1] ?? ''
+          if (/[。！？；…""''）》\.\!\?\;\)\>]/.test(lastChar)) {
+            result = result + group[i]
+          } else if (/[，、：,\:]/.test(lastChar)) {
+            result = result + group[i]
+          } else {
+            result = result + '，' + group[i]
+          }
+        }
+        return result
+      })
+      .join('\n\n')
+  })
+
+  return merged.join('\n\n')
+}
+
 function trendSignalsToTopicCards(topics: TrendSignal[]): TopicCardModel[] {
   return topics.map((t) => {
     const desc =
@@ -44,28 +98,6 @@ function trendSignalsToTopicCards(topics: TrendSignal[]): TopicCardModel[] {
       recommended: t.materialMatch === true,
     }
   })
-}
-
-function draftFromTopicCard(card: TopicCardModel): Draft {
-  const title = card.title.trim()
-  const desc = (card.description ?? '').trim()
-  return {
-    title: title || '方向草稿',
-    body: [
-      `这次我想按这个方向写：${title || '（未命名方向）'}`,
-      desc ? `方向说明：${desc}` : '',
-      '请先确认受众与目标，再按 ideashu-v5 流程继续生成正文草稿。',
-    ]
-      .filter(Boolean)
-      .join('\n\n'),
-    tags: title ? [title].slice(0, 1) : [],
-    cover: {
-      type: 'photo',
-      description: desc,
-      overlayText: title.slice(0, 12),
-      imageUrl: undefined,
-    },
-  }
 }
 
 function demoQualityScore(): QualityScore {
@@ -366,6 +398,8 @@ export default function WorkspacePage() {
 
   const currentDraftRef = useRef<Draft | undefined>(undefined)
   const suppressNextDraftRef = useRef(false)
+  // 标记当前回复轮次是否已收到 draft 事件，用于屏蔽同轮的 topics
+  const hasDraftInCurrentRoundRef = useRef(false)
   // Gateway/assistant may only return text; if the user attached an image in chat,
   // we inject it into the editor's cover slot by setting `draft.cover.imageUrl`.
   const lastLocalImageDataUrlRef = useRef<string | null>(null)
@@ -411,14 +445,10 @@ export default function WorkspacePage() {
       syncAccountsFromAssistantText(text)
       const replyId = evt.replyId
       setMessages((prev) => {
-        const existingMsgId = replyIdToMsgIdRef.current.get(replyId)
+        // Topics 机器载荷由选题卡片渲染，不进对话气泡，但也不删除已有消息
+        if (isTopicsPayload) return prev
 
-        // Topic machine payload is rendered by `topicCards`; never show it in chat bubbles.
-        if (isTopicsPayload) {
-          if (!existingMsgId) return prev
-          replyIdToMsgIdRef.current.delete(replyId)
-          return prev.filter((m) => m.id !== existingMsgId)
-        }
+        const existingMsgId = replyIdToMsgIdRef.current.get(replyId)
 
         if (existingMsgId) {
           const existing = prev.find((m) => m.id === existingMsgId)
@@ -431,9 +461,9 @@ export default function WorkspacePage() {
             }
             return prev.map((m) => (m.id === existingMsgId ? { ...m, content: text } : m))
           }
-          replyIdToMsgIdRef.current.delete(replyId)
         }
 
+        // 去重：已有相同内容的助手消息则跳过
         if (
           prev.some(
             (m) =>
@@ -457,6 +487,11 @@ export default function WorkspacePage() {
       }
 
       if (evt.type === 'topics') {
+        // 如果编辑器已有草稿，或本轮已收到过 draft 事件，忽略 topics
+        if (hasDraftInCurrentRoundRef.current) return
+        if (currentDraftRef.current && draftHasMeaningfulContent(currentDraftRef.current)) {
+          return
+        }
         setTopicCards(trendSignalsToTopicCards(evt.topics))
         return
       }
@@ -466,20 +501,32 @@ export default function WorkspacePage() {
           suppressNextDraftRef.current = false
           return
         }
+        // 标记本轮已收到 draft，屏蔽后续 topics
+        hasDraftInCurrentRoundRef.current = true
+        // 收到草稿后立即清空选题卡片
+        setTopicCards([])
+
         const localImg = lastLocalImageDataUrlRef.current
         const evtDraft = evt.draft
+
+        // 修复 Skill 返回的"一句一行"格式，合并为自然段落
+        const fixedDraft = {
+          ...evtDraft,
+          body: mergeShortLinesToParagraphs(evtDraft.body),
+        }
+
+        // 用户上传的图片注入封面：无论 Skill 返回什么封面类型，用户图片优先
         const injectedDraft =
-          localImg && !evtDraft.cover.imageUrl
+          localImg
             ? {
-                ...evtDraft,
+                ...fixedDraft,
                 cover: {
-                  ...evtDraft.cover,
+                  ...fixedDraft.cover,
                   imageUrl: localImg,
-                  // Ensure the cover slot shows an image rather than "文字封面".
-                  type: evtDraft.cover.type === 'text' ? 'photo' : evtDraft.cover.type,
+                  type: 'photo' as const,
                 },
               }
-            : evtDraft
+            : fixedDraft
 
         const finalized = injectedDraft.status === 'finalized'
 
@@ -561,36 +608,23 @@ export default function WorkspacePage() {
     const trimmed = text.trim()
     if (!trimmed && !options?.imageDataUrl) return
 
-    // Clicking "请选择方向" should sync to editor immediately, even before gateway returns `draft`.
+    // 选方向/选素材：清空卡片 UI，但不在前端填充编辑器。
+    // 发给 Skill 让它决定下一步（生成草稿、继续引导等）。
     const selectMatch = trimmed.match(/^选方向\s*(\d+)\s*[：:]/)
-    if (selectMatch) {
-      const idx = Number(selectMatch[1]) - 1
-      const picked = Number.isFinite(idx) && idx >= 0 ? topicCards[idx] : undefined
-      if (picked) {
-        const localDraft = draftFromTopicCard(picked)
-        currentDraftRef.current = localDraft
-        setLoadedDraft(localDraft)
-        setOriginalDraft(localDraft)
-        setQualityScore(undefined)
-        setOriginalityReport(undefined)
-        
-        // 选题后直接填充编辑器，不发送到后端（避免重复回复）
-        // 但添加一条本地消息记录用户操作
-        appendUserMessage(trimmed, { localImageDataUrl: options?.imageDataUrl })
-        
-        // 清空选题卡片
-        setTopicCards([])
-        replyIdToMsgIdRef.current.clear()
-        
-        return // 直接返回，不发送到后端
-      }
+    if (selectMatch && topicCards.length > 0) {
+      setTopicCards([])
+      // 不 return，继续走下面的正常发送流程
     }
 
     // Keep the latest attached image for potential cover-image injection.
     lastLocalImageDataUrlRef.current = options?.imageDataUrl ?? null
+    // 新一轮发送，重置 draft 标记
+    hasDraftInCurrentRoundRef.current = false
 
     setTopicCards([])
-    replyIdToMsgIdRef.current.clear()
+
+    // 在发送给网关的消息前附带当前账号信息，让 Skill 知道用户在哪个账号下操作
+    const accountContext = `【当前创作账号：${activeAccount.name}（领域：${activeAccount.domain}）】\n`
 
     let wireText = trimmed
     if (options?.imageDataUrl && !options.skipMaterialSave) {
@@ -603,7 +637,24 @@ export default function WorkspacePage() {
       wireText = trimmed
         ? `${trimmed}\n\n【本地素材库已保存图片：${mat.id}】（网关仅传输文字；画面已写入本机「素材银行」）`
         : `【本地素材库已保存图片：${mat.id}】请结合我上传的画面继续引导。（网关仅传输文字；画面已写入本机「素材银行」）`
+
+      // 如果编辑器已有草稿，立即把用户图片注入封面（不等 Skill 返回 draft 事件）
+      if (currentDraftRef.current && draftHasMeaningfulContent(currentDraftRef.current)) {
+        const updatedDraft = {
+          ...currentDraftRef.current,
+          cover: {
+            ...currentDraftRef.current.cover,
+            imageUrl: options.imageDataUrl,
+            type: 'photo' as const,
+          },
+        }
+        currentDraftRef.current = updatedDraft
+        setLoadedDraft(updatedDraft)
+      }
     }
+
+    // 最终发送的文本 = 账号上下文 + 用户消息
+    wireText = accountContext + wireText
 
     appendUserMessage(trimmed || (options?.imageDataUrl ? '' : ''), {
       localImageDataUrl: options?.imageDataUrl,
@@ -644,6 +695,7 @@ export default function WorkspacePage() {
     }
 
     // On account switch, always clear editor/session view first, then restore from account-scoped state.
+    openclaw.resetAssistantStreamState()
     currentDraftRef.current = undefined
     lastLocalImageDataUrlRef.current = null
     setLoadedDraft(undefined)

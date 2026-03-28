@@ -1,11 +1,12 @@
 /* eslint-disable react-hooks/set-state-in-effect */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useActiveAccount } from '../contexts/ActiveAccountContext'
 import { generateCoverPreview } from '../lib/coverCanvas'
 import { persistableImageUrl } from '../lib/imageCompress'
 import {
   addStyleSampleFromPost,
+  loadPosts,
   saveDraftSession,
   savePost,
   uidForPost,
@@ -76,46 +77,8 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n))
 }
 
-/** 合并连续空行，避免 Skill 输出多换行时产生大量「空白段落」撑开版心 */
-function collapseConsecutiveEmptyLines(parts: string[]): string[] {
-  const out: string[] = []
-  for (const part of parts) {
-    if (part === '' && out.length > 0 && out[out.length - 1] === '') continue
-    out.push(part)
-  }
-  return out.length ? out : ['']
-}
-
-/**
- * 去掉夹在两条有内容段落之间的「空段落」——Skill 常用 \n\n 分段，会多出一个空行，
- * 在按段渲染时就会变成很大的段间距。
- */
-function dropEmptyParagraphGaps(parts: string[]): string[] {
-  if (parts.length <= 2) return parts
-  return parts.filter((p, i) => {
-    if (p !== '') return true
-    const prev = i > 0 ? parts[i - 1] : ''
-    const next = i < parts.length - 1 ? parts[i + 1] : ''
-    if (prev !== '' && next !== '') return false
-    return true
-  })
-}
-
-/** 与规格一致：正文按单行换行分段（保存/对比均用 \n） */
-function splitBodyLines(text: string): string[] {
-  const normalized = (text ?? '').replace(/\r\n/g, '\n')
-  if (!normalized) return ['']
-  const merged = collapseConsecutiveEmptyLines(normalized.split('\n'))
-  const parts = dropEmptyParagraphGaps(merged)
-  return parts.length ? parts : ['']
-}
-
-function splitBodyLinesInput(text: string): string[] {
-  const normalized = (text ?? '').replace(/\r\n/g, '\n')
-  if (!normalized) return ['']
-  const merged = collapseConsecutiveEmptyLines(normalized.split('\n'))
-  const parts = dropEmptyParagraphGaps(merged)
-  return parts.length ? parts : ['']
+function normalizeDraftBody(text: string) {
+  return (text ?? '').replace(/\r\n/g, '\n')
 }
 
 function countChars(s: string) {
@@ -156,184 +119,6 @@ export function calculateRewriteRatio(
   return changedChars / currentTotal
 }
 
-function AutoGrowParagraph({
-  value,
-  readOnly,
-  modified,
-  onChange,
-  onCompositionStart,
-  onCompositionEnd,
-}: {
-  value: string
-  readOnly: boolean
-  modified: boolean
-  onChange: (next: string) => void
-  onCompositionStart?: () => void
-  onCompositionEnd?: () => void
-}) {
-  const ref = useRef<HTMLTextAreaElement | null>(null)
-
-  useEffect(() => {
-    const el = ref.current
-    if (!el) return
-    el.style.height = 'auto'
-    const h = el.scrollHeight
-    // 空段落仍占一行高度，避免浏览器 scrollHeight 过大导致段间距「空一截」
-    const blank = !value.trim()
-    el.style.height = `${blank ? Math.min(h, 18) : h}px`
-  }, [value])
-
-  return (
-    <div
-      className={
-        modified
-          ? 'border-l-[3px] border-l-emerald-500 pl-2'
-          : 'border-l-[3px] border-l-[#e5e7eb] pl-2'
-      }
-      // Allow paragraph editing to only scroll vertically.
-      // Body-level swipe delete uses the single right strip (not the textarea).
-      style={{ touchAction: 'pan-y' }}
-    >
-      <textarea
-        ref={ref}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onCompositionStart={() => onCompositionStart?.()}
-        onCompositionEnd={() => onCompositionEnd?.()}
-        readOnly={readOnly}
-        style={{ touchAction: 'pan-y' }}
-        className="w-full resize-none outline-none bg-transparent border-none p-0 text-[13px] leading-[1.45] text-text-main placeholder:text-text-secondary/70"
-        rows={1}
-      />
-    </div>
-  )
-}
-
-/** 正文整块右侧一条侧滑区；左滑或上下滑删除，按按下位置的纵向区间对应段落。 */
-function BodyParagraphsWithSideSwipe({
-  paragraphs,
-  readOnly,
-  modifiedParagraphs,
-  onChangeParagraph,
-  onDeleteParagraph,
-  onCompositionStart,
-  onCompositionEnd,
-}: {
-  paragraphs: string[]
-  readOnly: boolean
-  modifiedParagraphs: boolean[]
-  onChangeParagraph: (idx: number, next: string) => void
-  onDeleteParagraph: (idx: number) => void
-  onCompositionStart: () => void
-  onCompositionEnd: () => void
-}) {
-  const rowRefs = useRef<(HTMLDivElement | null)[]>([])
-  const draggingRef = useRef(false)
-  const startXRef = useRef(0)
-  const startYRef = useRef(0)
-  /** 与常见列表侧滑一致，略低一点便于触控命中 */
-  const deleteThresholdPx = 28
-
-  useEffect(() => {
-    rowRefs.current.length = paragraphs.length
-  }, [paragraphs.length])
-
-  function indexAtClientY(y: number): number | null {
-    let best: number | null = null
-    let bestDist = Infinity
-    for (let i = 0; i < paragraphs.length; i++) {
-      const el = rowRefs.current[i]
-      if (!el) continue
-      const r = el.getBoundingClientRect()
-      if (y >= r.top && y <= r.bottom) return i
-      const mid = (r.top + r.bottom) / 2
-      const d = Math.abs(y - mid)
-      if (d < bestDist) {
-        bestDist = d
-        best = i
-      }
-    }
-    return best
-  }
-
-  const textBlock = (
-    <div className="min-w-0 flex-1 flex flex-col gap-0">
-      {paragraphs.map((p, idx) => {
-        const modified = modifiedParagraphs[idx] ?? false
-        return (
-          <div key={idx} ref={(el) => { rowRefs.current[idx] = el }}>
-            <AutoGrowParagraph
-              value={p}
-              readOnly={readOnly}
-              modified={modified}
-              onChange={(next) => onChangeParagraph(idx, next)}
-              onCompositionStart={onCompositionStart}
-              onCompositionEnd={onCompositionEnd}
-            />
-          </div>
-        )
-      })}
-    </div>
-  )
-
-  if (readOnly) {
-    return textBlock
-  }
-
-  return (
-    <div className="flex min-w-0 items-stretch gap-0">
-      {textBlock}
-      <div
-        className="relative flex w-7 shrink-0 flex-col items-stretch border-l border-border-muted/60 bg-canvas/40"
-        style={{ touchAction: 'none' }}
-        aria-hidden
-        onPointerDown={(e) => {
-          draggingRef.current = true
-          startXRef.current = e.clientX
-          startYRef.current = e.clientY
-          try {
-            e.currentTarget.setPointerCapture(e.pointerId)
-          } catch {
-            // ignore
-          }
-        }}
-        onPointerUp={(e) => {
-          if (!draggingRef.current) return
-          draggingRef.current = false
-          const dx = e.clientX - startXRef.current
-          const dy = e.clientY - startYRef.current
-          const absDx = Math.abs(dx)
-          const absDy = Math.abs(dy)
-
-          // 左滑删除（略放宽纵向分量，避免窄条上误当成「纯纵向」）
-          const leftSwipe =
-            dx < 0 &&
-            absDx >= deleteThresholdPx &&
-            absDx >= absDy * 0.45
-          // 上下滑删除（▲▼ 提示）
-          const verticalSwipe =
-            absDy >= deleteThresholdPx &&
-            absDy >= absDx * 0.45
-
-          if (!leftSwipe && !verticalSwipe) return
-
-          const idx = indexAtClientY((startYRef.current + e.clientY) / 2)
-          if (idx !== null) onDeleteParagraph(idx)
-        }}
-        onPointerCancel={() => {
-          draggingRef.current = false
-        }}
-      >
-        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-0.5 py-1">
-          <span className="shrink-0 text-[8px] leading-none text-text-secondary/70">▲</span>
-          <div className="min-h-[12px] w-0.5 flex-1 rounded-full bg-text-secondary/35" />
-          <span className="shrink-0 text-[8px] leading-none text-text-secondary/70">▼</span>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 export default function XhsPostEditor({
   stage = 1,
   loadedDraft,
@@ -348,7 +133,7 @@ export default function XhsPostEditor({
   onRequestStyleAnalysis,
 }: Props) {
   const navigate = useNavigate()
-  const { activeAccount, activeAccountId, addCumulativeEditsToActiveAccount } = useActiveAccount()
+  const { activeAccount, activeAccountId } = useActiveAccount()
   const [title, setTitle] = useState('')
   const [tags, setTags] = useState<string[]>([])
   const [tagInput, setTagInput] = useState('')
@@ -359,8 +144,9 @@ export default function XhsPostEditor({
     imageUrl: undefined,
   })
 
-  const [paragraphs, setParagraphs] = useState<string[]>([''])
-  const [originalParagraphs, setOriginalParagraphs] = useState<string[]>([])
+  const [body, setBody] = useState('')
+  /** 阶段三起用于整条正文左侧「是否相对基准有改动」；阶段二与载入时正文一致 */
+  const [originalBodySnapshot, setOriginalBodySnapshot] = useState('')
 
   const [postId, setPostId] = useState<string | null>(null)
   const [editHistory, setEditHistory] = useState<EditRecord[]>([])
@@ -412,62 +198,22 @@ export default function XhsPostEditor({
   /** 1s debounce 后的改写率（0~1） */
   const [debouncedRewriteRatio, setDebouncedRewriteRatio] = useState(0)
 
-  const persistedSessionEditCountRef = useRef(0)
-  const editHistoryLengthRef = useRef(0)
-  editHistoryLengthRef.current = editHistory.length
-
-  // 清空内容函数
-  const handleClearContent = useCallback(() => {
-    if (confirm('确定要清空所有内容吗？此操作不可恢复。')) {
-      setTitle('')
-      setParagraphs([])
-      setTags([])
-      setTagInput('')
-      setCover({
-        type: 'photo',
-        description: '',
-        overlayText: '',
-        imageUrl: undefined,
-      })
-      setCoverImageFile(null)
-      setEditHistory([])
-      // 通知父组件
-      onDraftChange?.({
-        title: '',
-        body: '',
-        tags: [],
-        cover: {
-          type: 'photo',
-          description: '',
-          overlayText: '',
-          imageUrl: undefined,
-        },
-      })
-    }
-  }, [onDraftChange])
-
   const hasDraft = stage >= 2 && !!loadedDraft
-  const editCount = editHistory.length
 
-  const historicalEditCount = activeAccount.cumulativeEditCount ?? 0
-  const totalEditCount = historicalEditCount + editCount
-  const progressToNext = totalEditCount % 10
-  const styleProgressDisplay = totalEditCount > 0 && progressToNext === 0 ? 10 : progressToNext
+  const portfolioSaveCount = useMemo(
+    () => loadPosts(activeAccountId).length,
+    [activeAccountId],
+  )
+  const progressToNext = portfolioSaveCount % 10
+  const styleProgressDisplay =
+    portfolioSaveCount > 0 && progressToNext === 0 ? 10 : progressToNext
   const styleBarWidthPct =
-    totalEditCount > 0 && progressToNext === 0 ? 100 : (progressToNext / 10) * 100
+    portfolioSaveCount > 0 && progressToNext === 0 ? 100 : (progressToNext / 10) * 100
   const styleAnalysisCount = activeAccount.styleAnalysisCount ?? 0
-  /** 下一轮可触发风格分析所需的累计编辑下限（10、20、30…） */
+  /** 下一轮可触发风格分析所需的作品集保存篇数（10、20、30…） */
   const nextStyleAnalysisAt = (styleAnalysisCount + 1) * 10
   const showStyleAnalysisPrompt =
-    totalEditCount >= nextStyleAnalysisAt && typeof onRequestStyleAnalysis === 'function'
-
-  const flushSessionEditsToAccount = useCallback(() => {
-    const delta = editHistory.length - persistedSessionEditCountRef.current
-    if (delta > 0) {
-      addCumulativeEditsToActiveAccount(delta)
-      persistedSessionEditCountRef.current = editHistory.length
-    }
-  }, [editHistory.length, addCumulativeEditsToActiveAccount])
+    portfolioSaveCount >= nextStyleAnalysisAt && typeof onRequestStyleAnalysis === 'function'
 
   // Boot / 选题：无 Skill 草稿时保持编辑器空白，避免占位文案污染。
   useEffect(() => {
@@ -480,12 +226,11 @@ export default function XhsPostEditor({
     setTags([])
     setTagInput('')
     setCover({ type: 'photo', description: '', overlayText: '', imageUrl: undefined })
-    setParagraphs([''])
-    setOriginalParagraphs([])
+    setBody('')
+    setOriginalBodySnapshot('')
     setPostId(null)
     setEditHistory([])
     setSessionCreatedAt('')
-    persistedSessionEditCountRef.current = 0
     setDebouncedRewriteRatio(0)
     setCoverImageFile(null)
     if (coverCompositeObjectUrlRef.current) {
@@ -515,15 +260,20 @@ export default function XhsPostEditor({
     setTitle(loadedDraft.title)
     setTags(loadedDraft.tags)
     setTagInput('')
-    setCover(loadedDraft.cover)
-    setParagraphs(splitBodyLines(loadedDraft.body))
-    setOriginalParagraphs(splitBodyLines(loadedDraft.body))
+    const c0 = loadedDraft.cover
+    setCover(
+      c0.imageUrl?.trim()
+        ? { ...c0, type: 'photo' }
+        : c0,
+    )
+    const b0 = normalizeDraftBody(loadedDraft.body)
+    setBody(b0)
+    setOriginalBodySnapshot(b0)
     const now = new Date().toISOString()
     const nextPostId = uidForPost()
     setPostId(nextPostId)
     setEditHistory([])
     setSessionCreatedAt(now)
-    persistedSessionEditCountRef.current = 0
     setCoverImageFile(null)
     if (coverCompositeObjectUrlRef.current) {
       URL.revokeObjectURL(coverCompositeObjectUrlRef.current)
@@ -552,7 +302,7 @@ export default function XhsPostEditor({
   useEffect(() => {
     if (stage < 3) return
     if (!originalDraft) return
-    setOriginalParagraphs(splitBodyLines(originalDraft.body))
+    setOriginalBodySnapshot(normalizeDraftBody(originalDraft.body))
   }, [stage, originalDraft])
 
   // Keep refs in sync for debounced persistence.
@@ -563,11 +313,11 @@ export default function XhsPostEditor({
   useEffect(() => {
     draftRef.current = {
       title,
-      body: paragraphs.join('\n'),
+      body,
       tags,
       cover,
     }
-  }, [title, tags, paragraphs, cover])
+  }, [title, tags, body, cover])
 
   // WS integration helper: expose a debounced snapshot of the editor draft to the parent.
   useEffect(() => {
@@ -577,14 +327,14 @@ export default function XhsPostEditor({
     const t = window.setTimeout(() => {
       onDraftChange({
         title,
-        body: paragraphs.join('\n'),
+        body,
         tags,
         cover,
       })
     }, 250)
 
     return () => window.clearTimeout(t)
-  }, [onDraftChange, stage, title, paragraphs, tags, cover])
+  }, [onDraftChange, stage, title, body, tags, cover])
 
   // 原创度改写率：编辑后 1s debounce 再更新（基线来自 Skill 或默认 10%）
   useEffect(() => {
@@ -594,11 +344,11 @@ export default function XhsPostEditor({
       return
     }
     const t = window.setTimeout(() => {
-      const current = { title, body: paragraphs.join('\n') }
+      const current = { title, body }
       setDebouncedRewriteRatio(calculateRewriteRatio(orig, current))
     }, 1000)
     return () => window.clearTimeout(t)
-  }, [title, paragraphs, originalitySessionTick])
+  }, [title, body, originalitySessionTick])
 
   // 用户上传照片后：Canvas 合成封面预览（大字变更时重算）
   useEffect(() => {
@@ -637,17 +387,7 @@ export default function XhsPostEditor({
     return () => {
       if (idleQualityTimerRef.current) window.clearTimeout(idleQualityTimerRef.current)
     }
-  }, [stage, title, paragraphs, cover.overlayText, cover.imageUrl, tags, onSubmitQuality])
-
-  useEffect(() => {
-    return () => {
-      const delta = editHistoryLengthRef.current - persistedSessionEditCountRef.current
-      if (delta > 0) {
-        addCumulativeEditsToActiveAccount(delta)
-        persistedSessionEditCountRef.current = editHistoryLengthRef.current
-      }
-    }
-  }, [addCumulativeEditsToActiveAccount])
+  }, [stage, title, body, cover.overlayText, cover.imageUrl, tags, onSubmitQuality])
 
   const originality = useMemo<OriginalityReport>(() => {
     const baselineFromSkill = originalityReport?.userMaterialPct ?? 10
@@ -669,20 +409,15 @@ export default function XhsPostEditor({
     }
   }, [originalityReport, debouncedRewriteRatio])
 
-  const modifiedParagraphs = useMemo(() => {
-    return paragraphs.map((p, idx) => {
-      const o = originalParagraphs[idx] ?? ''
-      return idx >= originalParagraphs.length || p !== o
-    })
-  }, [paragraphs, originalParagraphs])
+  const bodyModified = useMemo(() => body !== originalBodySnapshot, [body, originalBodySnapshot])
 
   const charCount = useMemo(() => countChars(title), [title])
 
   const wordCount = useMemo(() => {
     // Rough count: count non-space characters in body + title.
-    const text = `${title}\n${paragraphs.join('\n')}`
+    const text = `${title}\n${body}`
     return text.replace(/\s/g, '').length
-  }, [title, paragraphs])
+  }, [title, body])
 
   function commitEdit() {
     if (!postId) return
@@ -732,7 +467,7 @@ export default function XhsPostEditor({
     pendingEditRef.current = null
 
     const now = new Date().toISOString()
-    const currentBody = paragraphs.join('\n')
+    const currentBody = body
     const record: EditRecord = {
       id: uidForPost(),
       postId,
@@ -770,7 +505,6 @@ export default function XhsPostEditor({
 
   async function handleSaveToKB() {
     if (stageRef.current < 2) return
-    flushSessionEditsToAccount()
     const original = originalDraftRef.current
     if (!original) return
 
@@ -781,7 +515,7 @@ export default function XhsPostEditor({
     const storedImageUrl = await persistableImageUrl(cover.imageUrl)
     const draft: Draft = {
       title,
-      body: paragraphs.join('\n'),
+      body,
       tags,
       cover: { ...cover, imageUrl: storedImageUrl },
     }
@@ -838,59 +572,6 @@ export default function XhsPostEditor({
     recordEdit()
   }
 
-  function onChangeParagraph(idx: number, next: string) {
-    if (stage >= 4) return
-
-    // 本段被删空：去掉该段 DOM，避免留下带绿条/侧栏的空白块（至少保留一段可编辑）
-    if (!next.trim()) {
-      if (isComposingRef.current) {
-        setParagraphs((prev) => {
-          const copy = [...prev]
-          copy[idx] = next
-          return copy
-        })
-        return
-      }
-      setParagraphs((prev) => {
-        if (prev.length <= 1) return ['']
-        const copy = [...prev]
-        copy.splice(idx, 1)
-        return copy.length ? copy : ['']
-      })
-      setOriginalParagraphs((prev) => {
-        if (prev.length <= 1) return prev
-        const copy = [...prev]
-        copy.splice(idx, 1)
-        return copy.length ? copy : ['']
-      })
-      if (!isComposingRef.current) recordEdit()
-      return
-    }
-
-    const nextParas = splitBodyLinesInput(next)
-    setParagraphs((prev) => {
-      const copy = [...prev]
-      copy.splice(idx, 1, ...nextParas)
-      return copy
-    })
-    if (!isComposingRef.current) recordEdit()
-  }
-
-  function deleteParagraph(idx: number) {
-    if (stage >= 4) return
-    setParagraphs((prev) => {
-      const copy = [...prev]
-      copy.splice(idx, 1)
-      return copy.length ? copy : ['']
-    })
-    setOriginalParagraphs((prev) => {
-      const copy = [...prev]
-      copy.splice(idx, 1)
-      return copy.length ? copy : ['']
-    })
-    if (!isComposingRef.current) recordEdit()
-  }
-
   function coverTypeLabel(t: CoverType): string {
     const m: Record<CoverType, string> = {
       photo: '实拍图',
@@ -916,9 +597,10 @@ export default function XhsPostEditor({
 
   function renderCoverSlot() {
     const canEdit = stage < 4
-    const hasUserPhoto = coverImageFile !== null
+    const hasDisplayImage = coverImageFile !== null || !!(cover.imageUrl && cover.imageUrl.trim().length > 0)
     const skillCover = loadedDraft?.cover
-    const suggestType = skillCover?.type ?? cover.type
+    const suggestType =
+      hasDisplayImage ? ('photo' as CoverType) : (skillCover?.type ?? cover.type)
     const suggestDesc = (skillCover?.description ?? cover.description ?? '').trim() || '（暂无画面描述）'
     const overlayLen = (cover.overlayText || '').length
     const overlayFontPx = Math.min(24, Math.max(14, 22 - Math.floor(overlayLen / 6)))
@@ -926,11 +608,13 @@ export default function XhsPostEditor({
     return (
       <div className="flex min-w-0 flex-col gap-2">
         <div
-          className={`relative aspect-[3/4] w-full overflow-hidden rounded-xl border ${
-            hasUserPhoto ? 'border-border-muted bg-black/5' : 'border-dashed border-border-muted'
+          className={`w-full overflow-hidden rounded-xl border ${
+            hasDisplayImage
+              ? 'border-border-muted bg-black/5'
+              : 'relative aspect-[3/4] border-dashed border-border-muted'
           }`}
         >
-          {!hasUserPhoto ? (
+          {!hasDisplayImage ? (
             <>
               <div
                 className="absolute inset-0 bg-gradient-to-br from-[#fce4ec] via-[#fff3e0] to-[#e8f5e9]"
@@ -962,35 +646,37 @@ export default function XhsPostEditor({
               </div>
             </>
           ) : (
-            <>
-              <img
-                src={cover.imageUrl}
-                alt="封面预览"
-                className="h-full w-full object-cover"
-              />
-              <div className="pointer-events-none absolute inset-x-0 bottom-0 h-[38%] bg-gradient-to-t from-black/60 to-transparent" />
-              <div className="absolute inset-x-0 bottom-0 p-3">
-                <input
-                  value={cover.overlayText}
-                  onChange={(e) => {
-                    if (!canEdit) return
-                    setCover((c) => ({ ...c, overlayText: e.target.value }))
-                    recordEdit()
-                  }}
-                  readOnly={!canEdit}
-                  placeholder="封面大字"
-                  className="pointer-events-auto w-full border-none bg-transparent text-center font-bold text-white outline-none placeholder:text-white/50"
-                  style={{ fontSize: `${overlayFontPx}px` }}
+            <div className="flex w-full justify-center p-1">
+              <div className="relative inline-block max-w-full">
+                <img
+                  src={cover.imageUrl}
+                  alt="封面预览"
+                  className="block h-auto max-h-[min(85vh,640px)] w-auto max-w-full"
                 />
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 h-[38%] bg-gradient-to-t from-black/60 to-transparent" />
+                <div className="absolute inset-x-0 bottom-0 p-3">
+                  <input
+                    value={cover.overlayText}
+                    onChange={(e) => {
+                      if (!canEdit) return
+                      setCover((c) => ({ ...c, overlayText: e.target.value }))
+                      recordEdit()
+                    }}
+                    readOnly={!canEdit}
+                    placeholder="封面大字"
+                    className="pointer-events-auto w-full border-none bg-transparent text-center font-bold text-white outline-none placeholder:text-white/50"
+                    style={{ fontSize: `${overlayFontPx}px` }}
+                  />
+                </div>
               </div>
-            </>
+            </div>
           )}
         </div>
 
         {canEdit ? (
           <div className="flex flex-wrap gap-2">
             <label className="cursor-pointer rounded-lg border border-border-muted bg-surface px-3 py-1.5 text-[11px] font-semibold text-text-main transition-colors hover:border-primary/40 hover:text-primary">
-              {hasUserPhoto ? '更换照片' : '上传照片'}
+              {hasDisplayImage ? '更换照片' : '上传照片'}
               <input
                 type="file"
                 accept="image/*"
@@ -1005,7 +691,7 @@ export default function XhsPostEditor({
             </label>
             <button
               type="button"
-              disabled={!hasUserPhoto}
+              disabled={!coverImageFile}
               onClick={() => void handleDownloadCover()}
               className="rounded-lg border border-border-muted bg-surface px-3 py-1.5 text-[11px] font-semibold text-text-main transition-colors hover:border-primary/40 hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
             >
@@ -1025,28 +711,29 @@ export default function XhsPostEditor({
       ? [loadedDraft.mode, loadedDraft.structureType].filter(Boolean).join(' · ')
       : ''
 
-  const draftBodyPreview = paragraphs.join('\n')
+  const draftBodyPreview = body
 
   const aiSuggestionItems = useMemo(() => {
     const sug = qualityScore?.suggestions ?? []
-    const n = Math.max(paragraphs.length, 1)
+    const lineCount = Math.max(body.split('\n').length, 1)
+    const n = lineCount
     return sug.map((text, i) => ({
       id: `ai-sug-${i}`,
       paragraphIndex: i % n,
       text,
       applied: !!appliedSuggestionIds[`ai-sug-${i}`],
     }))
-  }, [qualityScore, paragraphs.length, appliedSuggestionIds])
+  }, [qualityScore, body, appliedSuggestionIds])
 
   function applyAiSuggestion(id: string, paragraphIndex: number, text: string) {
     if (stage >= 4) return
-    setParagraphs((prev) => {
-      const next = [...prev]
-      if (paragraphIndex >= 0 && paragraphIndex < next.length) {
-        next[paragraphIndex] = text
-      }
-      return next
-    })
+    const lines = body.split('\n')
+    if (paragraphIndex >= 0 && paragraphIndex < lines.length) {
+      lines[paragraphIndex] = text
+      setBody(lines.join('\n'))
+    } else {
+      setBody((prev) => (prev.trim() ? `${prev}\n\n${text}` : text))
+    }
     setAppliedSuggestionIds((prev) => ({ ...prev, [id]: true }))
     recordEdit()
   }
@@ -1074,23 +761,13 @@ export default function XhsPostEditor({
             {hasDraft ? '可编辑' : '等待草稿'}
           </div>
           {hasDraft ? (
-            <>
-              <button
-                type="button"
-                onClick={handleClearContent}
-                className="rounded-md border border-border-muted px-2 py-1 text-[10px] font-medium text-text-secondary transition-colors hover:border-red-400/50 hover:text-red-500"
-                title="清空标题、正文、标签和封面"
-              >
-                清空内容
-              </button>
-              <button
-                type="button"
-                onClick={() => onResetDraftSession?.()}
-                className="rounded-md border border-border-muted px-2 py-1 text-[10px] font-medium text-text-secondary transition-colors hover:border-primary/30 hover:text-primary"
-              >
-                重置草稿
-              </button>
-            </>
+            <button
+              type="button"
+              onClick={() => onResetDraftSession?.()}
+              className="rounded-md border border-border-muted px-2 py-1 text-[10px] font-medium text-text-secondary transition-colors hover:border-primary/30 hover:text-primary"
+            >
+              重置草稿
+            </button>
           ) : null}
         </div>
       </div>
@@ -1122,32 +799,43 @@ export default function XhsPostEditor({
             />
           </div>
 
-          {/* Body：按段竖线标记 AI / 用户改写 */}
+          {/* Body：整块可编辑 */}
           <div className="space-y-1">
             <div className="text-[11px] font-semibold text-text-secondary">正文</div>
-            <BodyParagraphsWithSideSwipe
-              paragraphs={paragraphs}
-              readOnly={isReadOnly}
-              modifiedParagraphs={modifiedParagraphs}
-              onChangeParagraph={onChangeParagraph}
-              onDeleteParagraph={(idx) => {
-                if (isReadOnly) return
-                deleteParagraph(idx)
-              }}
-              onCompositionStart={() => {
-                isComposingRef.current = true
-                if (editDebounceTimer.current) {
-                  window.clearTimeout(editDebounceTimer.current)
-                  editDebounceTimer.current = null
-                }
-                pendingEditRef.current = null
-              }}
-              onCompositionEnd={() => {
-                if (isReadOnly) return
-                isComposingRef.current = false
-                recordEdit()
-              }}
-            />
+            <div
+              className={
+                bodyModified
+                  ? 'border-l-[3px] border-l-emerald-500 pl-2'
+                  : 'border-l-[3px] border-l-[#e5e7eb] pl-2'
+              }
+              style={{ touchAction: 'pan-y' }}
+            >
+              <textarea
+                value={body}
+                onChange={(e) => {
+                  if (isReadOnly) return
+                  setBody(e.target.value)
+                  recordEdit()
+                }}
+                onCompositionStart={() => {
+                  isComposingRef.current = true
+                  if (editDebounceTimer.current) {
+                    window.clearTimeout(editDebounceTimer.current)
+                    editDebounceTimer.current = null
+                  }
+                  pendingEditRef.current = null
+                }}
+                onCompositionEnd={() => {
+                  if (isReadOnly) return
+                  isComposingRef.current = false
+                  recordEdit()
+                }}
+                readOnly={isReadOnly}
+                placeholder="写正文…（可随意换行、增删）"
+                rows={10}
+                className="min-h-[200px] w-full resize-y rounded-md bg-transparent py-1 text-[13px] leading-[1.5] text-text-main outline-none placeholder:text-text-secondary/70"
+              />
+            </div>
           </div>
 
           {/* Tags */}
@@ -1352,7 +1040,7 @@ export default function XhsPostEditor({
               <div className="flex items-center justify-between text-[10px] font-medium text-text-secondary">
                 <span>
                   风格 {styleProgressDisplay}/10
-                  {totalEditCount > 0 && progressToNext === 0 ? (
+                  {portfolioSaveCount > 0 && progressToNext === 0 ? (
                     <span className="ml-1 text-emerald-600">已满档</span>
                   ) : null}
                 </span>
@@ -1363,7 +1051,9 @@ export default function XhsPostEditor({
                   style={{
                     width: `${styleBarWidthPct}%`,
                     backgroundColor:
-                      totalEditCount > 0 && progressToNext === 0 ? '#22c55e' : 'rgba(255, 36, 66, 0.2)',
+                      portfolioSaveCount > 0 && progressToNext === 0
+                        ? '#22c55e'
+                        : 'rgba(255, 36, 66, 0.2)',
                   }}
                 />
               </div>

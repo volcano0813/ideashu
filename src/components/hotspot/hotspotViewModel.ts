@@ -3,7 +3,7 @@ import type { HotTopic, HotTopicType, HotTrend } from '../../types/hotspot'
 
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000
 
-/** 统一展示：热点资讯有效窗口为近 3 天（替换模型里常见的 3–7 天表述） */
+/** 统一展示：列表层硬窗口为近 3 天；抓取提示里另要求模型优先近 24h */
 function normalizeHotspotWindowLabel(detail: string | undefined): string {
   const d = (detail ?? '').trim()
   if (!d) return '热点窗口 3 天内'

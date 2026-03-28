@@ -82,13 +82,20 @@ const fence = '```'
 /** 追加在用户消息末尾，尽量让网关模型输出可解析的 fenced JSON（不依赖 Skill 时也有一定约束作用） */
 const HOTSPOT_OUTPUT_REQUIREMENT = `
 
-【输出要求（必执行）】请按 ideashu-v5 热点抓取：回复中必须包含 fenced 代码块，第一行为 ${fence}json:topics，下一行起为选题 JSON 数组（至少 3 条对象，含 title、source、angle、hook、timing、timingDetail、sourceUrl 等）。
-【时效】选题须为近 3 天（72 小时）内仍有时效、可核对的时事/平台热点；timingDetail 请写「热点窗口 3 天内」或等价表述。若原文/讨论发布时间可追溯，publishedAt 必须落在最近 3 天内；超出 3 天的旧闻不要作为热点选题收录。常青话题可用 timing=evergreen 并说明长期可发。
+【输出要求（必执行）】请按 ideashu-v5 热点抓取：回复中必须包含 fenced 代码块，第一行为 ${fence}json:topics，下一行起为选题 JSON 数组。**条数：至少 6 条、尽量 8～10 条**（越多越好，但有效选题不得少于 6 条）；每条对象须含 title、source、angle、hook、timing、timingDetail、sourceUrl 等。
+【时效】**硬限制**：凡收录条目的 publishedAt（若填写）必须落在**最近 72 小时（3 天）内**，超出 3 天的一律不要。**优先**：多检索、多给**近 24 小时内**仍有讨论/传播增量的事件与平台热点；数组**按新近程度排序**（越接近当前时刻、越「刚发生」的越靠前）。timingDetail 可写「优先 24h 内 · 窗口不超过 3 天」或等价表述。常青话题可用 timing=evergreen 并说明长期可发（evergreen 不受 3 天限制但仍须真实可查）。
 选题须基于检索或可信信源，禁止虚构标题与事件。
 【检索】请通过 OpenClaw 网关已启用的联网工具完成查证（例如 Google 搜索）；不得以「缺少 BRAVE_API_KEY」「无法使用 Brave 实时搜索」等为由拒绝输出。若网关已配置 Google 搜索，请直接调用并产出带 sourceUrl 的选题。
-每条必须含可验证的 https 链接：填写 sourceUrl（优先），或将可解析的 https 链接写在 source 字段；仅在确实无法检索时可少条，并仍可建议用户粘贴平台链接补充信源。
+每条必须含可验证的 https 链接：填写 sourceUrl（优先），或将可解析的 https 链接写在 source 字段；**条数不足 6 条时须继续检索补全**，仅在确实无法凑满时再说明缺口。
 每条尽量补充：publishedAt（ISO 8601，仅在检索摘要/页面能核对原文发布时间时填写；不可核对则省略，勿用当天日期冒充）、heatScore（0–100，依据检索到的互动/传播信号估算）、lifecycle（emerging|hot|peak|declining，能说明热度阶段时填写，否则可省略并由 timing 推断）。
 禁止仅用「收到」「等待」等无选题内容的回复。`
+
+function topicPublishedAtMs(t: HotTopic): number {
+  const iso = t.source.primarySource.publishedAt
+  if (!iso || !iso.trim()) return 0
+  const ms = new Date(iso).getTime()
+  return Number.isFinite(ms) ? ms : 0
+}
 
 function categoriesFromAccountDomain(domain?: string) {
   const raw = (domain ?? '').trim()
@@ -114,7 +121,7 @@ export default function HotspotPage() {
   const hotspotAwaitingTopicsRef = useRef(false)
 
   const [activeCategory, setActiveCategory] = useState<string>('all')
-  const [sortKey, setSortKey] = useState<HotspotSortKey>('heat')
+  const [sortKey, setSortKey] = useState<HotspotSortKey>('time')
   const [fetchError, setFetchError] = useState<string | null>(null)
   /** null=未探测；true=Vite 已挂 __openclaw_device_auth 且读到 token；false=404/失败（多为未用 Vite 打开页面） */
   const [deviceAuthOk, setDeviceAuthOk] = useState<boolean | null>(null)
@@ -141,6 +148,8 @@ export default function HotspotPage() {
 
   /** 切换账号：与单例 openclaw 对齐网关状态，并重置自动抓取以便新账号领域再抓一次 */
   useEffect(() => {
+    // 清掉流式 buffer / 去重指纹，避免上一账号未完成的回复或相同正文被误判为重复而不派发 topics
+    openclaw.resetAssistantStreamState()
     setGatewayReady(openclaw.isReady())
     const cached = loadHotspotCache(activeAccountId)
     setFetchedAt(cached.fetchedAt)
@@ -192,6 +201,8 @@ export default function HotspotPage() {
   useEffect(() => {
     const unsub = openclaw.onEvent((evt) => {
       if (evt.type === 'topics') {
+        // 忽略非本轮「立即抓取」产生的 topics（如其它页、或切换账号前的迟滞事件）
+        if (!hotspotAwaitingTopicsRef.current) return
         hotspotAwaitingTopicsRef.current = false
         clearFetchTimeout()
         setFetchError(null)
@@ -261,7 +272,14 @@ export default function HotspotPage() {
     // Skill 触发词：以「找热点 + 关键词/领域」贴近 ideashu-v5；末尾追加硬性输出要求以提高 json:topics 产出率
     const parts = ['找热点']
     if (d && d !== '未设置') parts.push(d)
-    openclaw.send(parts.join(' ') + HOTSPOT_OUTPUT_REQUIREMENT)
+    const message = parts.join(' ') + HOTSPOT_OUTPUT_REQUIREMENT
+    const sent = openclaw.send(message)
+    if (!sent) {
+      clearFetchTimeout()
+      hotspotAwaitingTopicsRef.current = false
+      setSending(false)
+      setFetchError('网关未就绪，抓取请求未发出。请稍后重试，或点击「重新连接网关」。')
+    }
   }, [activeAccount.domain, activeAccountId])
 
   useEffect(() => {
@@ -288,7 +306,10 @@ export default function HotspotPage() {
       activeCategory === 'all' ? filtered : filtered.filter((t) => (t.category || '').includes(activeCategory))
     const sorted = [...byCategory].sort((a, b) => {
       if (sortKey === 'heat') return b.heat.score - a.heat.score
-      return new Date(b.date).getTime() - new Date(a.date).getTime()
+      const tb = topicPublishedAtMs(b)
+      const ta = topicPublishedAtMs(a)
+      if (tb !== ta) return tb - ta
+      return b.heat.score - a.heat.score
     })
     return sorted
   }, [topics, dismissedIds, activeCategory, sortKey])
@@ -303,7 +324,7 @@ export default function HotspotPage() {
             <div>
               <div className="text-2xl font-black text-text-main">热点抓取</div>
               <div className="mt-1 text-[13px] font-semibold text-text-tertiary">
-                热点资讯窗口：近 3 天内 · 基于账号定位匹配 · 信源由网关侧检索 · 每条须可溯源
+                每次抓取至少 6 条、尽量 8～10 条 · 优先近 24h 内 · 发布时间须在 3 天内 · 基于账号领域 · 每条须可溯源
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -387,7 +408,7 @@ export default function HotspotPage() {
                 ) : signals.length === 0 ? (
                   '还没有热点结果。'
                 ) : signalsForUi.length === 0 ? (
-                  '近 3 天窗口：当前抓取里没有发布时间在近 3 天内的热点。请重试抓取，或让助手按窗口补充 publishedAt。'
+                  '近 3 天窗口：当前结果里没有落在 3 天内的条目。请重试抓取，并让助手优先 24h 内热点、每条补充 publishedAt。'
                 ) : (
                   '没有符合筛选条件的热点。'
                 )}

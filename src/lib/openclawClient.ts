@@ -147,8 +147,10 @@ export type OpenClawEvent =
 export type OpenClawClient = {
   connect: () => Promise<void>
   disconnect: () => void
-  /** Plain user text to Gateway (same as Feishu client). No client-side business suffixes. */
-  send: (content: string) => void
+  /** Plain user text to Gateway (same as Feishu client). Returns false if gateway not ready (message not sent). */
+  send: (content: string) => boolean
+  /** Clear stream buffer + assistant dedupe (e.g. after switching account) without dropping the WebSocket. */
+  resetAssistantStreamState: () => void
   onEvent: (cb: (evt: OpenClawEvent) => void) => () => void
   /** Latest assistant prose (for StrictMode remount / missed React state sync). Cleared on send/connect/disconnect. */
   getLastAssistantReply: () => Extract<OpenClawEvent, { type: 'assistant_reply' }> | null
@@ -673,6 +675,21 @@ function parseLooseHotspotList(text: string): unknown[] | null {
   }
 
   return out.length > 0 ? out : null
+}
+
+/**
+ * Stream 中已出现 ```json:topics 或未闭合的 ``` 时，说明 JSON 可能仍在生成（例如联网检索间隔数秒）。
+ * 此时不应因短空闲就 flush 并清空 buffer，否则后续 chunk 会进新 buffer，热点页也会提前判失败。
+ */
+function bufferLooksLikeIncompleteJsonTopicsFence(raw: string): boolean {
+  if (!/json:topics/i.test(raw)) return false
+  const fences = raw.match(/```/g)
+  return !fences || fences.length % 2 !== 0
+}
+
+/** 网关常对同一条助手回复连发多次 `chat+message`，仅空白略有差异；用于去重避免重复 topics / 刷屏 */
+function normalizeAssistantRawForFingerprint(s: string): string {
+  return s.replace(/\s+/g, ' ').trim()
 }
 
 function emitJsonBlocksFromBuffer(fullText: string, emit: (evt: OpenClawEvent) => void) {
@@ -1204,13 +1221,19 @@ export function createOpenClawClient({
 
   /** Full assistant reply text: agent chunks append `payload.data.text`; chat + `message` flushes and parses ```json:*``` blocks. */
   let messageBuffer = ''
+  /** First non-empty merged byte time for current agent stream segment (reset when buffer drained). */
+  let agentStreamFirstChunkAt: number | null = null
 
   /**
    * Some gateways stream only `agent` events and never emit `chat` with `message`, so the buffer would
    * never flush. Schedule a parse after the stream goes idle (last agent chunk).
+   *
+   * 飞书等非流式场景一次到位；网页走 WS 流式时，模型在工具调用（搜索）之间可能静默 10s+。
+   * 2s 空闲会误把开场白当终态 flush 掉，导致 json:topics 永远进不了同一次 parse。
    */
   let agentIdleFlushTimer: number | null = null
-  const AGENT_IDLE_FLUSH_MS = 2000
+  const AGENT_IDLE_FLUSH_MS = 18_000
+  const AGENT_STREAM_FORCE_FLUSH_MS = 120_000
 
   function clearAgentIdleFlushTimer() {
     if (agentIdleFlushTimer != null) {
@@ -1224,6 +1247,13 @@ export function createOpenClawClient({
     agentIdleFlushTimer = window.setTimeout(() => {
       agentIdleFlushTimer = null
       if (!messageBuffer.trim()) return
+      const started = agentStreamFirstChunkAt
+      const forceByAge =
+        started != null && Date.now() - started >= AGENT_STREAM_FORCE_FLUSH_MS
+      if (!forceByAge && bufferLooksLikeIncompleteJsonTopicsFence(messageBuffer)) {
+        scheduleAgentIdleFlush()
+        return
+      }
       parseAndEmitMessageBuffer('agent_stream_idle', activeAssistantReplyId)
     }, AGENT_IDLE_FLUSH_MS)
   }
@@ -1254,8 +1284,8 @@ export function createOpenClawClient({
     parseAndEmitMessageBuffer('agent_stream+json_topics_fence', activeAssistantReplyId)
   }
 
-  /** Same assistant body sometimes gets flushed twice (e.g. duplicate `chat` events); skip second emit. */
-  let lastAssistantRawFingerprint: string | null = null
+  /** 同一次助手正文（规范化后）只解析/派发一次，避免 chat+message 重复帧 */
+  let lastEmittedAssistantContentFingerprint: string | null = null
 
   /** reply identity used to update the same chat bubble record instead of pushing duplicates */
   let activeAssistantReplyId: string | null = null
@@ -1268,7 +1298,7 @@ export function createOpenClawClient({
   const lastEmittedDisplayNormByReplyId = new Map<string, string>()
 
   function resetAssistantDedupe() {
-    lastAssistantRawFingerprint = null
+    lastEmittedAssistantContentFingerprint = null
     activeAssistantReplyId = null
     lastRawFullEmittedByReplyId.clear()
     lastEmittedDisplayNormByReplyId.clear()
@@ -1310,17 +1340,15 @@ export function createOpenClawClient({
   function clearMessageBuffer() {
     clearAgentIdleFlushTimer()
     messageBuffer = ''
+    agentStreamFirstChunkAt = null
   }
 
-  function emitAssistantParse(raw: string, replyId: string) {
-    const fp = `${replyId}::${raw.trim()}`
-    if (!fp) return
-    if (lastAssistantRawFingerprint === fp) {
-      // eslint-disable-next-line no-console
-      console.warn('[openclawClient] skip duplicate assistant parse (identical raw text)')
-      return
+  function emitAssistantParse(raw: string, replyId: string): boolean {
+    const contentFp = normalizeAssistantRawForFingerprint(raw)
+    if (contentFp.length > 0 && contentFp === lastEmittedAssistantContentFingerprint) {
+      return false
     }
-    lastAssistantRawFingerprint = fp
+    lastEmittedAssistantContentFingerprint = contentFp
 
     // Emit structured JSON-derived events first so Hotspot (and similar) can consume `topics`
     // before `assistant_reply` and avoid treating a failed prose parse as final when json:topics
@@ -1362,6 +1390,7 @@ export function createOpenClawClient({
         }
       }
     }
+    return true
   }
 
   function parseCompleteAssistantTextFromPayload(
@@ -1381,13 +1410,19 @@ export function createOpenClawClient({
     clearAgentIdleFlushTimer()
     const text = messageBuffer
     messageBuffer = ''
+    agentStreamFirstChunkAt = null
     if (!text.trim()) return
-    // eslint-disable-next-line no-console
-    console.log('[openclawClient] buffer tail (last 500 chars):', text.slice(-500))
-    // eslint-disable-next-line no-console
-    console.log('[openclawClient] extractJsonBlocks result:', JSON.stringify(extractJsonBlocks(text)))
-    // eslint-disable-next-line no-console
-    console.log('[openclawClient] message complete, parse', reason, 'len=', text.length)
+    const rid = replyId ?? activeAssistantReplyId ?? `${sessionKey ?? 'nosession'}::fb_${fallbackAssistantReplySeq++}`
+    const emitted = emitAssistantParse(text, rid)
+    if (!emitted) return
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line no-console
+      console.log('[openclawClient] buffer tail (last 500 chars):', text.slice(-500))
+      // eslint-disable-next-line no-console
+      console.log('[openclawClient] extractJsonBlocks result:', JSON.stringify(extractJsonBlocks(text)))
+      // eslint-disable-next-line no-console
+      console.log('[openclawClient] message complete, parse', reason, 'len=', text.length)
+    }
     try {
       if (debugParsedJsonIngestCount < 10) {
         debugParsedJsonIngestCount += 1
@@ -1403,8 +1438,6 @@ export function createOpenClawClient({
         })
       }
     } catch {}
-    const rid = replyId ?? activeAssistantReplyId ?? `${sessionKey ?? 'nosession'}::fb_${fallbackAssistantReplySeq++}`
-    emitAssistantParse(text, rid)
   }
 
   function randomId(prefix = 'id') {
@@ -1789,6 +1822,9 @@ export function createOpenClawClient({
             const chunk = extractAgentChunkText(payload)
             const wasEmpty = messageBuffer.length === 0
             messageBuffer = mergeStreamTextChunk(messageBuffer, chunk)
+            if (messageBuffer.trim().length > 0 && agentStreamFirstChunkAt == null) {
+              agentStreamFirstChunkAt = Date.now()
+            }
             if (wasEmpty) {
               const derived = deriveReplyIdFromPayload(payload)
               activeAssistantReplyId =
@@ -1919,11 +1955,18 @@ export function createOpenClawClient({
     )
   }
 
-  function send(content: string) {
+  function resetAssistantStreamState() {
+    clearMessageBuffer()
+    undeliveredAssistantReply = null
+    lastAssistantReplySnapshot = null
+    resetAssistantDedupe()
+  }
+
+  function send(content: string): boolean {
     if (!isReady()) {
       // eslint-disable-next-line no-console
       console.warn('[openclawClient] send skipped: gateway not ready (no mock fallback)')
-      return
+      return false
     }
 
     clearMessageBuffer()
@@ -1962,12 +2005,14 @@ export function createOpenClawClient({
         idempotencyKey: randomId('idem'),
       },
     })
+    return true
   }
 
   return {
     connect,
     disconnect,
     send,
+    resetAssistantStreamState,
     isReady,
     onConnectionChange: (cb) => {
       connectionListeners.add(cb)
