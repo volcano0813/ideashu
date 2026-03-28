@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useActiveAccount } from '../contexts/ActiveAccountContext'
 import { deletePost, loadPosts, type KnowledgePost } from '../lib/ideashuStorage'
 
 const cardTints = [
@@ -191,14 +192,22 @@ function PortfolioCard({
 }
 
 export default function KnowledgeBasePage() {
-  const [posts, setPosts] = useState<KnowledgePost[]>(() => loadPosts())
+  const { activeAccountId } = useActiveAccount()
+  const [posts, setPosts] = useState<KnowledgePost[]>(() => loadPosts(activeAccountId))
   const [search, setSearch] = useState('')
   const [deleteId, setDeleteId] = useState<string | null>(null)
   const [openId, setOpenId] = useState<string | null>(null)
 
   function refresh() {
-    setPosts(loadPosts())
+    setPosts(loadPosts(activeAccountId))
   }
+
+  useEffect(() => {
+    refresh()
+    setSearch('')
+    setDeleteId(null)
+    setOpenId(null)
+  }, [activeAccountId])
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase()
@@ -377,7 +386,7 @@ export default function KnowledgeBasePage() {
                 <button
                   type="button"
                   onClick={() => {
-                    if (deleteId) deletePost(deleteId)
+                    if (deleteId) deletePost(activeAccountId, deleteId)
                     setDeleteId(null)
                     refresh()
                   }}

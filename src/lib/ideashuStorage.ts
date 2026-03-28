@@ -1,6 +1,8 @@
 import type { Draft, EditorStage } from '../components/XhsPostEditor'
 import { MOCK_ACCOUNTS, normalizeAccountFields, type Account } from './accounts'
 
+export const ACTIVE_ACCOUNT_KEY = 'ideashu.activeAccountId.v1'
+
 export type MaterialType = 'text' | 'photo' | 'voice' | 'data'
 
 export type Material = {
@@ -68,13 +70,37 @@ export type PendingPublish = {
   updatedAt: string
 }
 
-const MATERIALS_KEY = 'ideashu.materials.v1'
-const POSTS_KEY = 'ideashu.posts.v1'
-const DRAFT_SESSION_KEY = 'ideashu.draftSession.v1'
-const PENDING_DRAFT_KEY = 'ideashu.pendingDraft.v1'
-const STYLE_SAMPLES_KEY = 'ideashu.styleSamples.v1'
-const PENDING_PUBLISH_KEY = 'ideashu.pendingPublish.v1'
+/** Pre–per-account keys (one-time migration) */
+const LEGACY_MATERIALS_KEY = 'ideashu.materials.v1'
+const LEGACY_POSTS_KEY = 'ideashu.posts.v1'
+const LEGACY_DRAFT_SESSION_KEY = 'ideashu.draftSession.v1'
+const LEGACY_PENDING_DRAFT_KEY = 'ideashu.pendingDraft.v1'
+const LEGACY_STYLE_SAMPLES_KEY = 'ideashu.styleSamples.v1'
+const LEGACY_PENDING_PUBLISH_KEY = 'ideashu.pendingPublish.v1'
+
+const MIGRATION_FLAG_KEY = 'ideashu.migratedLegacy.v2'
+const DEDUPE_LEGACY_COPIES_FLAG_KEY = 'ideashu.dedupedLegacyCopies.v1'
+
 const ACCOUNTS_KEY = 'ideashu.accounts.v1'
+
+function materialsKey(accountId: string) {
+  return `ideashu.materials.${accountId}.v2`
+}
+function postsKey(accountId: string) {
+  return `ideashu.posts.${accountId}.v2`
+}
+function draftSessionKey(accountId: string) {
+  return `ideashu.draftSession.${accountId}.v2`
+}
+function pendingDraftKey(accountId: string) {
+  return `ideashu.pendingDraft.${accountId}.v2`
+}
+function styleSamplesKey(accountId: string) {
+  return `ideashu.styleSamples.${accountId}.v2`
+}
+function pendingPublishKey(accountId: string) {
+  return `ideashu.pendingPublish.${accountId}.v2`
+}
 
 function safeParseJSON<T>(raw: string | null): T | null {
   if (!raw) return null
@@ -94,79 +120,148 @@ function todayStr() {
 }
 
 function uid(prefix = 'id') {
-  // Works in modern browsers; fallback for older environments.
   const cryptoObj = (globalThis as unknown as { crypto?: { randomUUID?: () => string } })
     .crypto
   if (cryptoObj?.randomUUID) return `${prefix}_${cryptoObj.randomUUID()}`
   return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`
 }
 
-const DEFAULT_MATERIALS: Material[] = [
-  {
-    id: 'mat_1',
-    type: 'text',
-    content: `下午3点的光是最好的。从落地窗斜进来，刚好打在吧台的原木台面上，手冲壶的不锈钢反射出一小片光斑在天花板上晃。店主说他当初选这个铺面就是因为这扇窗——朝西南，下午的光能从2点一直晒到5点半。`,
-    topicTags: ['光影', '白天', '吧台'],
-    tintIndex: 0,
-    createdAt: '2026-03-26',
-    usedInPosts: [],
-  },
-  {
-    id: 'mat_2',
-    type: 'text',
-    content: `7点是最有意思的时刻。店主开始收咖啡器具，她开始从吧台下面拿出酒瓶。灯从白光慢慢调成暖黄，墙上那排搁板的射灯亮起来，酒瓶的颜色一下子就出来了——琥珀色、翠绿色、透明的。上一秒还是咖啡馆，10分钟后完全变了。最后走的那个写代码的男生抬头看了一眼，说'我以为换了一家店'。`,
-    topicTags: ['切换', '夜晚', '反差'],
-    tintIndex: 1,
-    createdAt: '2026-03-25',
-    usedInPosts: [],
-  },
-  {
-    id: 'mat_3',
-    type: 'text',
-    content: `今天试了他们新上的「深圳迟早」——名字来自'深圳迟早会下雨'这个梗。用的是云南的日晒豆，中浅烘，手冲出来有很明显的莓果酸，但尾韵是巧克力味的，很暖。38块，量不大但值这个味道。店主说这个豆子只做了5公斤，卖完就没了。`,
-    topicTags: ['咖啡', '手冲', '限定'],
-    tintIndex: 2,
-    createdAt: '2026-03-24',
-    usedInPosts: [],
-  },
-  {
-    id: 'mat_4',
-    type: 'text',
-    content: `她调酒的时候不看配方，说是'凭手感'。今天给我调了一杯没有名字的——金酒打底，加了茉莉花糖浆和一点青柠，上面飘了一片薄荷叶。入口是花香，然后是酒的劲，最后嘴里留下青柠的凉。她说这杯叫'还没想好'。58块。`,
-    topicTags: ['调酒', '夜晚', '人物'],
-    tintIndex: 3,
-    createdAt: '2026-03-23',
-    usedInPosts: [],
-  },
-  {
-    id: 'mat_5',
-    type: 'text',
-    content: `拍了两张同一个角度的照片。一张是下午4点，阳光打在木桌上，桌上放着一杯手冲和一本摊开的书。另一张是晚上9点，同一张桌子，灯光暗了，桌上变成一杯冒着烟雾的鸡尾酒和一个手机架（在放歌）。发给朋友看，她说'这真的是同一个地方？'`,
-    topicTags: ['反差', '白天vs夜晚', '视觉'],
-    tintIndex: 4,
-    createdAt: '2026-03-22',
-    usedInPosts: [],
-  },
-  {
-    id: 'mat_6',
-    type: 'text',
-    content: `和店主聊了一会。他之前在互联网公司做产品经理，她在4A广告公司做创意。两个人都30岁那年辞职了。他说'做咖啡是因为想要一个每天能看到阳光的工作'，她说'调酒是因为晚上的人更容易说真话'。他们没有合伙人，装修是自己设计的，菜单是自己写的，连门口的手写黑板都是她的字。`,
-    topicTags: ['人物', '店主', '故事'],
-    tintIndex: 5,
-    createdAt: '2026-03-21',
-    usedInPosts: [],
-  },
-]
+function migrateLegacyToPerAccount(accounts: Account[]) {
+  try {
+    if (localStorage.getItem(MIGRATION_FLAG_KEY) === '1') return
 
-export function loadMaterials(): Material[] {
-  const parsed = safeParseJSON<Material[]>(localStorage.getItem(MATERIALS_KEY))
-  if (parsed && Array.isArray(parsed) && parsed.length > 0) return parsed
-  localStorage.setItem(MATERIALS_KEY, JSON.stringify(DEFAULT_MATERIALS))
-  return DEFAULT_MATERIALS
+    const legacyKeys = [
+      LEGACY_MATERIALS_KEY,
+      LEGACY_POSTS_KEY,
+      LEGACY_DRAFT_SESSION_KEY,
+      LEGACY_PENDING_DRAFT_KEY,
+      LEGACY_STYLE_SAMPLES_KEY,
+      LEGACY_PENDING_PUBLISH_KEY,
+    ]
+    const hasLegacy = legacyKeys.some((k) => localStorage.getItem(k) !== null)
+    if (!hasLegacy) {
+      localStorage.setItem(MIGRATION_FLAG_KEY, '1')
+      return
+    }
+
+    const lm = localStorage.getItem(LEGACY_MATERIALS_KEY)
+    const lp = localStorage.getItem(LEGACY_POSTS_KEY)
+    const ld = localStorage.getItem(LEGACY_DRAFT_SESSION_KEY)
+    const lpd = localStorage.getItem(LEGACY_PENDING_DRAFT_KEY)
+    const ls = localStorage.getItem(LEGACY_STYLE_SAMPLES_KEY)
+    const lpp = localStorage.getItem(LEGACY_PENDING_PUBLISH_KEY)
+
+    for (const a of accounts) {
+      const id = a.id
+      if (!localStorage.getItem(materialsKey(id)) && lm != null) {
+        localStorage.setItem(materialsKey(id), lm)
+      }
+      if (!localStorage.getItem(postsKey(id)) && lp != null) {
+        localStorage.setItem(postsKey(id), lp)
+      }
+      if (!localStorage.getItem(draftSessionKey(id)) && ld != null) {
+        localStorage.setItem(draftSessionKey(id), ld)
+      }
+      if (!localStorage.getItem(pendingDraftKey(id)) && lpd != null) {
+        localStorage.setItem(pendingDraftKey(id), lpd)
+      }
+      if (!localStorage.getItem(styleSamplesKey(id)) && ls != null) {
+        localStorage.setItem(styleSamplesKey(id), ls)
+      }
+      if (!localStorage.getItem(pendingPublishKey(id)) && lpp != null) {
+        localStorage.setItem(pendingPublishKey(id), lpp)
+      }
+    }
+
+    for (const k of legacyKeys) {
+      localStorage.removeItem(k)
+    }
+    localStorage.setItem(MIGRATION_FLAG_KEY, '1')
+  } catch {
+    // ignore quota / private mode
+  }
 }
 
-export function addMaterial(input: Omit<Material, 'id' | 'createdAt' | 'usedInPosts'>) {
-  const materials = loadMaterials()
+/**
+ * One-time cleanup for an old migration behavior that copied the same legacy
+ * data to every account bucket. We keep the owner account's data (prefer
+ * "每日一杯"), and clear only buckets that are byte-equal copies.
+ */
+function cleanupDuplicatedLegacyCopies(accounts: Account[]) {
+  try {
+    if (localStorage.getItem(DEDUPE_LEGACY_COPIES_FLAG_KEY) === '1') return
+    if (!accounts.length) {
+      localStorage.setItem(DEDUPE_LEGACY_COPIES_FLAG_KEY, '1')
+      return
+    }
+
+    const owner =
+      accounts.find((a) => (a.name ?? '').replace(/\*/g, '').trim() === '每日一杯') ?? accounts[0]
+    if (!owner) {
+      localStorage.setItem(DEDUPE_LEGACY_COPIES_FLAG_KEY, '1')
+      return
+    }
+
+    const ownerMaterials = localStorage.getItem(materialsKey(owner.id))
+    const ownerPosts = localStorage.getItem(postsKey(owner.id))
+    const ownerStyleSamples = localStorage.getItem(styleSamplesKey(owner.id))
+    const ownerDraftSession = localStorage.getItem(draftSessionKey(owner.id))
+    const ownerPendingDraft = localStorage.getItem(pendingDraftKey(owner.id))
+    const ownerPendingPublish = localStorage.getItem(pendingPublishKey(owner.id))
+
+    for (const a of accounts) {
+      if (a.id === owner.id) continue
+
+      const mk = materialsKey(a.id)
+      const pk = postsKey(a.id)
+      const sk = styleSamplesKey(a.id)
+      const dk = draftSessionKey(a.id)
+      const pdk = pendingDraftKey(a.id)
+      const ppk = pendingPublishKey(a.id)
+
+      if (ownerMaterials != null && localStorage.getItem(mk) === ownerMaterials) {
+        localStorage.setItem(mk, JSON.stringify([]))
+      }
+      if (ownerPosts != null && localStorage.getItem(pk) === ownerPosts) {
+        localStorage.setItem(pk, JSON.stringify([]))
+      }
+      if (ownerStyleSamples != null && localStorage.getItem(sk) === ownerStyleSamples) {
+        localStorage.setItem(sk, JSON.stringify([]))
+      }
+      if (ownerDraftSession != null && localStorage.getItem(dk) === ownerDraftSession) {
+        localStorage.removeItem(dk)
+      }
+      if (ownerPendingDraft != null && localStorage.getItem(pdk) === ownerPendingDraft) {
+        localStorage.removeItem(pdk)
+      }
+      if (ownerPendingPublish != null && localStorage.getItem(ppk) === ownerPendingPublish) {
+        localStorage.removeItem(ppk)
+      }
+    }
+
+    localStorage.setItem(DEDUPE_LEGACY_COPIES_FLAG_KEY, '1')
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
+export function loadMaterials(accountId: string): Material[] {
+  if (!accountId) return []
+  const parsed = safeParseJSON<Material[]>(localStorage.getItem(materialsKey(accountId)))
+  if (parsed && Array.isArray(parsed)) return parsed
+  try {
+    localStorage.setItem(materialsKey(accountId), JSON.stringify([]))
+  } catch {
+    // ignore
+  }
+  return []
+}
+
+export function addMaterial(
+  accountId: string,
+  input: Omit<Material, 'id' | 'createdAt' | 'usedInPosts'>,
+) {
+  const materials = loadMaterials(accountId)
   const mat: Material = {
     ...input,
     id: uid('mat'),
@@ -174,15 +269,20 @@ export function addMaterial(input: Omit<Material, 'id' | 'createdAt' | 'usedInPo
     usedInPosts: [],
   }
   materials.unshift(mat)
-  localStorage.setItem(MATERIALS_KEY, JSON.stringify(materials))
+  try {
+    localStorage.setItem(materialsKey(accountId), JSON.stringify(materials))
+  } catch {
+    // ignore
+  }
   return mat
 }
 
 export function updateMaterial(
+  accountId: string,
   id: string,
   patch: Partial<Omit<Material, 'id' | 'createdAt' | 'usedInPosts'>>,
 ) {
-  const materials = loadMaterials()
+  const materials = loadMaterials(accountId)
   const idx = materials.findIndex((m) => m.id === id)
   if (idx < 0) return
   const cur = materials[idx]
@@ -192,60 +292,82 @@ export function updateMaterial(
   }
   const next = [...materials]
   next[idx] = merged
-  localStorage.setItem(MATERIALS_KEY, JSON.stringify(next))
+  try {
+    localStorage.setItem(materialsKey(accountId), JSON.stringify(next))
+  } catch {
+    // ignore
+  }
 }
 
-export function deleteMaterial(id: string) {
-  const materials = loadMaterials()
+export function deleteMaterial(accountId: string, id: string) {
+  const materials = loadMaterials(accountId)
   const next = materials.filter((m) => m.id !== id)
-  localStorage.setItem(MATERIALS_KEY, JSON.stringify(next))
+  try {
+    localStorage.setItem(materialsKey(accountId), JSON.stringify(next))
+  } catch {
+    // ignore
+  }
 }
 
-export function loadPosts(): KnowledgePost[] {
-  const parsed = safeParseJSON<KnowledgePost[]>(localStorage.getItem(POSTS_KEY))
+export function loadPosts(accountId: string): KnowledgePost[] {
+  if (!accountId) return []
+  const parsed = safeParseJSON<KnowledgePost[]>(localStorage.getItem(postsKey(accountId)))
   if (parsed && Array.isArray(parsed)) return parsed
   return []
 }
 
-export function savePost(post: KnowledgePost) {
-  const posts = loadPosts()
+export function savePost(accountId: string, post: KnowledgePost) {
+  const posts = loadPosts(accountId)
   const idx = posts.findIndex((p) => p.id === post.id)
   const next = [...posts]
   if (idx >= 0) next[idx] = post
   else next.unshift(post)
-  localStorage.setItem(POSTS_KEY, JSON.stringify(next))
+  try {
+    localStorage.setItem(postsKey(accountId), JSON.stringify(next))
+  } catch {
+    // ignore
+  }
 }
 
-export function deletePost(id: string) {
-  const posts = loadPosts()
+export function deletePost(accountId: string, id: string) {
+  const posts = loadPosts(accountId)
   const next = posts.filter((p) => p.id !== id)
-  localStorage.setItem(POSTS_KEY, JSON.stringify(next))
+  try {
+    localStorage.setItem(postsKey(accountId), JSON.stringify(next))
+  } catch {
+    // ignore
+  }
 }
 
-export function loadStyleSamples(): StyleSample[] {
-  const parsed = safeParseJSON<StyleSample[]>(localStorage.getItem(STYLE_SAMPLES_KEY))
+export function loadStyleSamples(accountId: string): StyleSample[] {
+  if (!accountId) return []
+  const parsed = safeParseJSON<StyleSample[]>(localStorage.getItem(styleSamplesKey(accountId)))
   if (parsed && Array.isArray(parsed)) return parsed
   return []
 }
 
-export function addStyleSample(input: Omit<StyleSample, 'id' | 'createdAt'>): StyleSample {
-  const samples = loadStyleSamples()
+export function addStyleSample(
+  accountId: string,
+  input: Omit<StyleSample, 'id' | 'createdAt'>,
+): StyleSample {
+  const samples = loadStyleSamples(accountId)
   const item: StyleSample = {
     ...input,
     id: uid('style'),
     createdAt: new Date().toISOString(),
   }
   samples.unshift(item)
-  localStorage.setItem(STYLE_SAMPLES_KEY, JSON.stringify(samples))
+  try {
+    localStorage.setItem(styleSamplesKey(accountId), JSON.stringify(samples))
+  } catch {
+    // ignore
+  }
   return item
 }
 
-export function addStyleSampleFromPost(post: KnowledgePost): StyleSample | null {
-  // Count any saved post as a "图文样本":
-  // - cover may be a real image or only a textual/overlay cover (demo/early stage).
-  // - the important part is that title/body/tags + cover exist.
+export function addStyleSampleFromPost(accountId: string, post: KnowledgePost): StyleSample | null {
   if (!post.title.trim() || !post.body.trim()) return null
-  return addStyleSample({
+  return addStyleSample(accountId, {
     title: post.title,
     body: post.body,
     tags: post.tags,
@@ -253,38 +375,69 @@ export function addStyleSampleFromPost(post: KnowledgePost): StyleSample | null 
   })
 }
 
-export function loadDraftSession(): DraftSession | null {
-  const parsed = safeParseJSON<DraftSession>(localStorage.getItem(DRAFT_SESSION_KEY))
+export function loadDraftSession(accountId: string): DraftSession | null {
+  if (!accountId) return null
+  const parsed = safeParseJSON<DraftSession>(localStorage.getItem(draftSessionKey(accountId)))
   return parsed ?? null
 }
 
-export function saveDraftSession(session: DraftSession) {
-  localStorage.setItem(DRAFT_SESSION_KEY, JSON.stringify(session))
+export function saveDraftSession(accountId: string, session: DraftSession) {
+  if (!accountId) return
+  try {
+    localStorage.setItem(draftSessionKey(accountId), JSON.stringify(session))
+  } catch {
+    // ignore
+  }
 }
 
-export function clearDraftSession() {
-  localStorage.removeItem(DRAFT_SESSION_KEY)
+export function clearDraftSession(accountId: string) {
+  if (!accountId) return
+  try {
+    localStorage.removeItem(draftSessionKey(accountId))
+  } catch {
+    // ignore
+  }
 }
 
-export function setPendingDraft(draft: Draft) {
-  localStorage.setItem(PENDING_DRAFT_KEY, JSON.stringify(draft))
+export function setPendingDraft(accountId: string, draft: Draft) {
+  if (!accountId) return
+  try {
+    localStorage.setItem(pendingDraftKey(accountId), JSON.stringify(draft))
+  } catch {
+    // ignore
+  }
 }
 
-export function consumePendingDraft(): Draft | null {
-  const raw = localStorage.getItem(PENDING_DRAFT_KEY)
+export function consumePendingDraft(accountId: string): Draft | null {
+  if (!accountId) return null
+  const raw = localStorage.getItem(pendingDraftKey(accountId))
   if (!raw) return null
-  localStorage.removeItem(PENDING_DRAFT_KEY)
+  try {
+    localStorage.removeItem(pendingDraftKey(accountId))
+  } catch {
+    // ignore
+  }
   return safeParseJSON<Draft>(raw)
 }
 
-export function setPendingPublish(pending: PendingPublish) {
-  localStorage.setItem(PENDING_PUBLISH_KEY, JSON.stringify(pending))
+export function setPendingPublish(accountId: string, pending: PendingPublish) {
+  if (!accountId) return
+  try {
+    localStorage.setItem(pendingPublishKey(accountId), JSON.stringify(pending))
+  } catch {
+    // ignore
+  }
 }
 
-export function consumePendingPublish(): PendingPublish | null {
-  const raw = localStorage.getItem(PENDING_PUBLISH_KEY)
+export function consumePendingPublish(accountId: string): PendingPublish | null {
+  if (!accountId) return null
+  const raw = localStorage.getItem(pendingPublishKey(accountId))
   if (!raw) return null
-  localStorage.removeItem(PENDING_PUBLISH_KEY)
+  try {
+    localStorage.removeItem(pendingPublishKey(accountId))
+  } catch {
+    // ignore
+  }
   return safeParseJSON<PendingPublish>(raw)
 }
 
@@ -298,6 +451,8 @@ export function loadAccounts(): Account[] {
     const mapped = parsed.map((a) => normalizeAccountFields(a))
     const dirty = mapped.some((a, i) => parsed[i]?.name !== a.name)
     if (dirty) saveAccounts(mapped)
+    migrateLegacyToPerAccount(mapped)
+    cleanupDuplicatedLegacyCopies(mapped)
     return mapped
   }
   const seed = [...MOCK_ACCOUNTS].map((a) => normalizeAccountFields(a))
@@ -306,6 +461,8 @@ export function loadAccounts(): Account[] {
   } catch {
     // ignore
   }
+  migrateLegacyToPerAccount(seed)
+  cleanupDuplicatedLegacyCopies(seed)
   return seed
 }
 
@@ -316,4 +473,3 @@ export function saveAccounts(accounts: Account[]) {
     // ignore quota / private mode
   }
 }
-

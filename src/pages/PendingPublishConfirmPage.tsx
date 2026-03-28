@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useActiveAccount } from '../contexts/ActiveAccountContext'
 import { persistableImageUrl } from '../lib/imageCompress'
 import {
   addStyleSampleFromPost,
@@ -17,8 +18,14 @@ function formatPreview(text: string) {
 
 export default function PendingPublishConfirmPage() {
   const navigate = useNavigate()
-  const [pending] = useState<PendingPublish | null>(() => consumePendingPublish())
+  const { activeAccountId } = useActiveAccount()
+  const [pending, setPending] = useState<PendingPublish | null>(() => consumePendingPublish(activeAccountId))
   const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    setPending(consumePendingPublish(activeAccountId))
+    setSaving(false)
+  }, [activeAccountId])
 
   const previewBody = useMemo(() => (pending ? formatPreview(pending.draft.body) : ''), [pending])
 
@@ -64,8 +71,8 @@ export default function PendingPublishConfirmPage() {
         updatedAt: now,
       }
 
-      savePost(post)
-      addStyleSampleFromPost(post)
+      savePost(activeAccountId, post)
+      addStyleSampleFromPost(activeAccountId, post)
       navigate('/knowledge-base')
     } finally {
       setSaving(false)

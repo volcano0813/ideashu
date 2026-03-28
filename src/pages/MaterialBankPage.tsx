@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useActiveAccount } from '../contexts/ActiveAccountContext'
 import { fileToCompressedDataUrl } from '../lib/imageCompress'
 import { addMaterial, deleteMaterial, loadMaterials, updateMaterial, type Material } from '../lib/ideashuStorage'
 import type { WorkspaceLocationState } from '../lib/workspaceLocationState'
@@ -154,7 +155,8 @@ function uidNonce() {
 
 export default function MaterialBankPage() {
   const navigate = useNavigate()
-  const [materials, setMaterials] = useState<Material[]>(() => loadMaterials())
+  const { activeAccountId } = useActiveAccount()
+  const [materials, setMaterials] = useState<Material[]>(() => loadMaterials(activeAccountId))
   const [search, setSearch] = useState('')
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -163,8 +165,14 @@ export default function MaterialBankPage() {
   const [formImageDataUrl, setFormImageDataUrl] = useState<string | null>(null)
 
   function refresh() {
-    setMaterials(loadMaterials())
+    setMaterials(loadMaterials(activeAccountId))
   }
+
+  useEffect(() => {
+    refresh()
+    closeModal()
+    setSearch('')
+  }, [activeAccountId])
 
   function closeModal() {
     setIsModalOpen(false)
@@ -203,7 +211,7 @@ export default function MaterialBankPage() {
     const text = formContent.trim()
     if (editingId) {
       if (formImageDataUrl) {
-        updateMaterial(editingId, {
+        updateMaterial(activeAccountId, editingId, {
           type: 'photo',
           content: text || '图片素材',
           imageDataUrl: formImageDataUrl,
@@ -213,13 +221,13 @@ export default function MaterialBankPage() {
           alert('内容不能为空')
           return
         }
-        updateMaterial(editingId, {
+        updateMaterial(activeAccountId, editingId, {
           type: 'text',
           content: text,
         })
       }
     } else if (formImageDataUrl) {
-      addMaterial({
+      addMaterial(activeAccountId, {
         type: 'photo',
         content: text || '图片素材',
         imageDataUrl: formImageDataUrl,
@@ -230,7 +238,7 @@ export default function MaterialBankPage() {
         alert('内容不能为空')
         return
       }
-      addMaterial({
+      addMaterial(activeAccountId, {
         type: 'text',
         content: text,
         topicTags: [],
@@ -280,7 +288,7 @@ export default function MaterialBankPage() {
                 onEdit={() => openEditMaterial(m)}
                 onDelete={() => {
                   if (!confirm('确认删除该素材？')) return
-                  deleteMaterial(m.id)
+                  deleteMaterial(activeAccountId, m.id)
                   refresh()
                 }}
               />

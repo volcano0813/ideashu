@@ -348,7 +348,7 @@ export default function XhsPostEditor({
   onRequestStyleAnalysis,
 }: Props) {
   const navigate = useNavigate()
-  const { activeAccount, addCumulativeEditsToActiveAccount } = useActiveAccount()
+  const { activeAccount, activeAccountId, addCumulativeEditsToActiveAccount } = useActiveAccount()
   const [title, setTitle] = useState('')
   const [tags, setTags] = useState<string[]>([])
   const [tagInput, setTagInput] = useState('')
@@ -415,6 +415,36 @@ export default function XhsPostEditor({
   const persistedSessionEditCountRef = useRef(0)
   const editHistoryLengthRef = useRef(0)
   editHistoryLengthRef.current = editHistory.length
+
+  // 清空内容函数
+  const handleClearContent = useCallback(() => {
+    if (confirm('确定要清空所有内容吗？此操作不可恢复。')) {
+      setTitle('')
+      setParagraphs([])
+      setTags([])
+      setTagInput('')
+      setCover({
+        type: 'photo',
+        description: '',
+        overlayText: '',
+        imageUrl: undefined,
+      })
+      setCoverImageFile(null)
+      setEditHistory([])
+      // 通知父组件
+      onDraftChange?.({
+        title: '',
+        body: '',
+        tags: [],
+        cover: {
+          type: 'photo',
+          description: '',
+          overlayText: '',
+          imageUrl: undefined,
+        },
+      })
+    }
+  }, [onDraftChange])
 
   const hasDraft = stage >= 2 && !!loadedDraft
   const editCount = editHistory.length
@@ -506,7 +536,7 @@ export default function XhsPostEditor({
     originalBodyRef.current = loadedDraft.body
     originalCoverRef.current = loadedDraft.cover
 
-    saveDraftSession({
+    saveDraftSession(activeAccountId, {
       postId: nextPostId,
       stage: 2,
       originalDraft: loadedDraft,
@@ -516,7 +546,7 @@ export default function XhsPostEditor({
       updatedAt: now,
     })
     setOriginalitySessionTick((t) => t + 1)
-  }, [stage, loadedDraft])
+  }, [stage, loadedDraft, activeAccountId])
 
   // If stage >= 3 and original draft is passed, use it for diff marking.
   useEffect(() => {
@@ -676,7 +706,7 @@ export default function XhsPostEditor({
       const next = [...prev, record]
       const sessionOriginal = originalDraftRef.current
       if (sessionOriginal) {
-        saveDraftSession({
+        saveDraftSession(activeAccountId, {
           postId,
           stage: stageRef.current,
           originalDraft: sessionOriginal,
@@ -724,7 +754,7 @@ export default function XhsPostEditor({
         tags,
         cover,
       }
-      saveDraftSession({
+      saveDraftSession(activeAccountId, {
         postId,
         stage: stageRef.current,
         originalDraft: sessionOriginal,
@@ -771,8 +801,8 @@ export default function XhsPostEditor({
       updatedAt: now,
     }
 
-    savePost(post)
-    addStyleSampleFromPost(post)
+    savePost(activeAccountId, post)
+    addStyleSampleFromPost(activeAccountId, post)
     navigate('/knowledge-base')
   }
 
@@ -1044,13 +1074,23 @@ export default function XhsPostEditor({
             {hasDraft ? '可编辑' : '等待草稿'}
           </div>
           {hasDraft ? (
-            <button
-              type="button"
-              onClick={() => onResetDraftSession?.()}
-              className="rounded-md border border-border-muted px-2 py-1 text-[10px] font-medium text-text-secondary transition-colors hover:border-primary/30 hover:text-primary"
-            >
-              重置草稿
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={handleClearContent}
+                className="rounded-md border border-border-muted px-2 py-1 text-[10px] font-medium text-text-secondary transition-colors hover:border-red-400/50 hover:text-red-500"
+                title="清空标题、正文、标签和封面"
+              >
+                清空内容
+              </button>
+              <button
+                type="button"
+                onClick={() => onResetDraftSession?.()}
+                className="rounded-md border border-border-muted px-2 py-1 text-[10px] font-medium text-text-secondary transition-colors hover:border-primary/30 hover:text-primary"
+              >
+                重置草稿
+              </button>
+            </>
           ) : null}
         </div>
       </div>

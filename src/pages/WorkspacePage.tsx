@@ -26,6 +26,12 @@ function normalizeAgentBubbleText(s: string) {
   return s.replace(/\s+/g, ' ').trim()
 }
 
+function isTopicsMachinePayload(text: string): boolean {
+  const s = (text ?? '').trim()
+  if (!s) return false
+  return /```json:topics\b/i.test(s) || /\bjson:topics\b/i.test(s)
+}
+
 function trendSignalsToTopicCards(topics: TrendSignal[]): TopicCardModel[] {
   return topics.map((t) => {
     const desc =
@@ -38,6 +44,28 @@ function trendSignalsToTopicCards(topics: TrendSignal[]): TopicCardModel[] {
       recommended: t.materialMatch === true,
     }
   })
+}
+
+function draftFromTopicCard(card: TopicCardModel): Draft {
+  const title = card.title.trim()
+  const desc = (card.description ?? '').trim()
+  return {
+    title: title || '方向草稿',
+    body: [
+      `这次我想按这个方向写：${title || '（未命名方向）'}`,
+      desc ? `方向说明：${desc}` : '',
+      '请先确认受众与目标，再按 ideashu-v5 流程继续生成正文草稿。',
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
+    tags: title ? [title].slice(0, 1) : [],
+    cover: {
+      type: 'photo',
+      description: desc,
+      overlayText: title.slice(0, 12),
+      imageUrl: undefined,
+    },
+  }
 }
 
 function demoQualityScore(): QualityScore {
@@ -71,7 +99,7 @@ export default function WorkspacePage() {
   const location = useLocation()
   const navigate = useNavigate()
   const openclaw = sharedOpenclaw
-  const { activeAccount, patchActiveAccount, accounts, upsertAccountProfile, addAccount } =
+  const { activeAccount, activeAccountId, patchActiveAccount, accounts, upsertAccountProfile, addAccount } =
     useActiveAccount()
 
   const syncedAccountNamesRef = useRef<Set<string>>(new Set())
@@ -367,7 +395,7 @@ export default function WorkspacePage() {
 
   function resetDraftSession() {
     suppressNextDraftRef.current = true
-    clearDraftSession()
+    clearDraftSession(activeAccountId)
     currentDraftRef.current = undefined
     lastLocalImageDataUrlRef.current = null
     setLoadedDraft(undefined)
@@ -379,10 +407,19 @@ export default function WorkspacePage() {
   useLayoutEffect(() => {
     function applyAssistantReply(evt: { replyId: string; text: string }) {
       const text = evt.text
+      const isTopicsPayload = isTopicsMachinePayload(text)
       syncAccountsFromAssistantText(text)
       const replyId = evt.replyId
       setMessages((prev) => {
         const existingMsgId = replyIdToMsgIdRef.current.get(replyId)
+
+        // Topic machine payload is rendered by `topicCards`; never show it in chat bubbles.
+        if (isTopicsPayload) {
+          if (!existingMsgId) return prev
+          replyIdToMsgIdRef.current.delete(replyId)
+          return prev.filter((m) => m.id !== existingMsgId)
+        }
+
         if (existingMsgId) {
           const existing = prev.find((m) => m.id === existingMsgId)
           if (existing) {
@@ -524,6 +561,31 @@ export default function WorkspacePage() {
     const trimmed = text.trim()
     if (!trimmed && !options?.imageDataUrl) return
 
+    // Clicking "请选择方向" should sync to editor immediately, even before gateway returns `draft`.
+    const selectMatch = trimmed.match(/^选方向\s*(\d+)\s*[：:]/)
+    if (selectMatch) {
+      const idx = Number(selectMatch[1]) - 1
+      const picked = Number.isFinite(idx) && idx >= 0 ? topicCards[idx] : undefined
+      if (picked) {
+        const localDraft = draftFromTopicCard(picked)
+        currentDraftRef.current = localDraft
+        setLoadedDraft(localDraft)
+        setOriginalDraft(localDraft)
+        setQualityScore(undefined)
+        setOriginalityReport(undefined)
+        
+        // 选题后直接填充编辑器，不发送到后端（避免重复回复）
+        // 但添加一条本地消息记录用户操作
+        appendUserMessage(trimmed, { localImageDataUrl: options?.imageDataUrl })
+        
+        // 清空选题卡片
+        setTopicCards([])
+        replyIdToMsgIdRef.current.clear()
+        
+        return // 直接返回，不发送到后端
+      }
+    }
+
     // Keep the latest attached image for potential cover-image injection.
     lastLocalImageDataUrlRef.current = options?.imageDataUrl ?? null
 
@@ -532,7 +594,7 @@ export default function WorkspacePage() {
 
     let wireText = trimmed
     if (options?.imageDataUrl && !options.skipMaterialSave) {
-      const mat = addMaterial({
+      const mat = addMaterial(activeAccountId, {
         type: 'photo',
         content: trimmed || '图片素材（聊天附带）',
         imageDataUrl: options.imageDataUrl,
@@ -564,7 +626,7 @@ export default function WorkspacePage() {
       if (handledWorkspaceAutoNonces.has(dedupeKey)) return
       handledWorkspaceAutoNonces.add(dedupeKey)
 
-      clearDraftSession()
+      clearDraftSession(activeAccountId)
       currentDraftRef.current = undefined
       lastLocalImageDataUrlRef.current = null
       setLoadedDraft(undefined)
@@ -581,7 +643,15 @@ export default function WorkspacePage() {
       return
     }
 
-    const pending = consumePendingDraft()
+    // On account switch, always clear editor/session view first, then restore from account-scoped state.
+    currentDraftRef.current = undefined
+    lastLocalImageDataUrlRef.current = null
+    setLoadedDraft(undefined)
+    setOriginalDraft(undefined)
+    setQualityScore(undefined)
+    setOriginalityReport(undefined)
+
+    const pending = consumePendingDraft(activeAccountId)
     if (pending && draftHasMeaningfulContent(pending)) {
       setLoadedDraft(pending)
       setOriginalDraft(pending)
@@ -589,11 +659,11 @@ export default function WorkspacePage() {
       setOriginalityReport(undefined)
       return
     }
-    const session = loadDraftSession()
+    const session = loadDraftSession(activeAccountId)
     if (!session) return
     setLoadedDraft(session.draft)
     setOriginalDraft(session.originalDraft)
-  }, [])
+  }, [activeAccountId])
 
   function handleDeepQuality() {
     if (connectAttempted && gatewayReady && openclaw.isReady()) {

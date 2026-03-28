@@ -1,100 +1,90 @@
 /**
- * useIdeashuSync Hook - 适配 IdeaShu 2.0 前端
+ * useIdeashuSync Hook
  * 
- * 用于实时同步飞书 ideashu-v5 对话内容
+ * 用于 React 前端实时同步 IdeaShu 飞书对话内容
  * 
- * 用法:
- * ```tsx
- * function Workspace() {
- *   const { isConnected, drafts, latestDraft } = useIdeashuSync({
- *     userId: 'default',
- *   });
- *   
- *   return (
- *     <div>
- *       <ConnectionStatus connected={isConnected} />
- *       <DraftList drafts={drafts} />
- *     </div>
- *   );
- * }
- * ```
+ * 修复版：解决 WebSocket 反复连接/断开的问题
+ * - 用 useRef 存储回调，避免回调变化触发重连
+ * - 加连接锁，防止并发创建多个 WebSocket
+ * - 加心跳 ping 保活
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react'
-import type { Draft } from '../components/XhsPostEditor'
+import { useEffect, useRef, useState, useCallback } from 'react';
 
 // ===== Types =====
 
-export interface SyncDraft extends Draft {
-  id: string
-  user_id?: string
-  session_id?: string
-  platform?: string
-  created_at?: string
-  updated_at?: string
+export interface Draft {
+  id: string;
+  title: string;
+  body: string;
+  tags: string[];
+  cover?: {
+    type: 'photo' | 'text' | 'collage' | 'compare' | 'list';
+    description: string;
+    overlayText?: string;
+  };
+  status: 'draft' | 'finalized';
+  platform: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Topic {
-  id: number
-  title: string
-  source: string
-  angle: string
-  hook: string
-  timing: 'hot' | 'evergreen'
-  timingDetail: string
-  materialMatch: boolean
-  materialCount: number
+  id: number;
+  title: string;
+  source: string;
+  angle: string;
+  hook: string;
+  timing: 'hot' | 'evergreen';
+  timingDetail: string;
+  materialMatch: boolean;
+  materialCount: number;
 }
 
 export interface ScoreData {
-  hook: number
-  authentic: number
-  aiSmell: number
-  diversity: number
-  cta: number
-  platform: number
-  total: number
-  brandMatch: 'match' | 'mismatch'
-  suggestions: string[]
-  dedup: 'no_duplicate' | string
+  hook: number;
+  authentic: number;
+  aiSmell: number;
+  diversity: number;
+  cta: number;
+  platform: number;
+  total: number;
+  brandMatch: 'match' | 'mismatch';
+  suggestions: string[];
+  dedup: 'no_duplicate' | string;
 }
 
 export interface OriginalityData {
-  userMaterialPct: number
-  aiAssistPct: number
-  compliance: 'safe' | 'caution' | 'risk'
-  materialSources: string[]
+  userMaterialPct: number;
+  aiAssistPct: number;
+  compliance: 'safe' | 'caution' | 'risk';
+  materialSources: string[];
 }
 
 export interface UseIdeashuSyncOptions {
-  userId?: string
-  serverUrl?: string
-  wsUrl?: string
-  autoConnect?: boolean
-  onDraftUpdate?: (draft: SyncDraft) => void
-  onTopicsUpdate?: (topics: Topic[]) => void
-  onScoreUpdate?: (data: { score: ScoreData; originality: OriginalityData }) => void
-  onConnect?: () => void
-  onDisconnect?: () => void
-  onError?: (error: Error) => void
+  userId?: string;
+  serverUrl?: string;
+  wsUrl?: string;
+  autoConnect?: boolean;
+  onDraftUpdate?: (draft: Draft) => void;
+  onTopicsUpdate?: (topics: Topic[]) => void;
+  onScoreUpdate?: (data: { score: ScoreData; originality: OriginalityData }) => void;
+  onConnect?: () => void;
+  onDisconnect?: () => void;
+  onError?: (error: Error) => void;
 }
 
 export interface UseIdeashuSyncReturn {
-  // 状态
-  isConnected: boolean
-  isLoading: boolean
-  error: Error | null
-
-  // 数据
-  drafts: SyncDraft[]
-  latestDraft: SyncDraft | null
-  topics: Topic[] | null
-
-  // 操作
-  connect: () => void
-  disconnect: () => void
-  refreshDrafts: () => Promise<void>
-  getDraft: (id: string) => Promise<SyncDraft | null>
+  isConnected: boolean;
+  isLoading: boolean;
+  error: Error | null;
+  drafts: Draft[];
+  latestDraft: Draft | null;
+  topics: Topic[] | null;
+  connect: () => void;
+  disconnect: () => void;
+  refreshDrafts: () => Promise<void>;
+  getDraft: (id: string) => Promise<Draft | null>;
 }
 
 // ===== Hook =====
@@ -102,175 +92,224 @@ export interface UseIdeashuSyncReturn {
 export function useIdeashuSync(options: UseIdeashuSyncOptions = {}): UseIdeashuSyncReturn {
   const {
     userId = 'default',
-    serverUrl = '/api',
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    wsUrl: _wsUrl,
+    serverUrl = 'http://localhost:3001',
+    wsUrl = 'ws://localhost:3001',
     autoConnect = true,
-    onDraftUpdate,
-    onTopicsUpdate,
-    onScoreUpdate,
-    onConnect,
-    onDisconnect,
-    onError,
-  } = options
+  } = options;
 
-  const wsRef = useRef<WebSocket | null>(null)
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const reconnectAttemptsRef = useRef(0)
-  const MAX_RECONNECT_ATTEMPTS = 5
+  // ---- 用 ref 存回调，避免回调引用变化触发重连 ----
+  const callbacksRef = useRef(options);
+  callbacksRef.current = options;
 
-  const [isConnected, setIsConnected] = useState(false)
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<Error | null>(null)
-  const [drafts, setDrafts] = useState<SyncDraft[]>([])
-  const [latestDraft, setLatestDraft] = useState<SyncDraft | null>(null)
-  const [topics, setTopics] = useState<Topic[] | null>(null)
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isConnectingRef = useRef(false);
+  const isMountedRef = useRef(true);
+  const reconnectCountRef = useRef(0);
+  const MAX_RECONNECT = 5;
 
-  // 获取草稿列表
+  const [isConnected, setIsConnected] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+  const [drafts, setDrafts] = useState<Draft[]>([]);
+  const [latestDraft, setLatestDraft] = useState<Draft | null>(null);
+  const [topics, setTopics] = useState<Topic[] | null>(null);
+
+  // ---- HTTP 方法（稳定引用，只依赖 serverUrl/userId）----
   const refreshDrafts = useCallback(async () => {
-    setIsLoading(true)
+    setIsLoading(true);
     try {
-      const response = await fetch(`${serverUrl}/drafts?userId=${userId}`)
-      const result = await response.json()
+      const response = await fetch(`${serverUrl}/api/drafts?userId=${userId}`);
+      const result = await response.json();
       if (result.success) {
-        setDrafts(result.data)
+        setDrafts(result.data);
         if (result.data.length > 0) {
-          setLatestDraft(result.data[0])
+          setLatestDraft(result.data[0]);
         }
       }
     } catch (err) {
-      setError(err instanceof Error ? err : new Error('Failed to fetch drafts'))
-      onError?.(err instanceof Error ? err : new Error('Failed to fetch drafts'))
+      const e = err instanceof Error ? err : new Error('Failed to fetch drafts');
+      setError(e);
+      callbacksRef.current.onError?.(e);
     } finally {
-      setIsLoading(false)
+      setIsLoading(false);
     }
-  }, [serverUrl, userId, onError])
+  }, [serverUrl, userId]);
 
-  // 获取单条草稿
-  const getDraft = useCallback(
-    async (id: string): Promise<SyncDraft | null> => {
-      try {
-        const response = await fetch(`${serverUrl}/drafts/${id}`)
-        const result = await response.json()
-        return result.success ? result.data : null
-      } catch (err) {
-        onError?.(err instanceof Error ? err : new Error('Failed to fetch draft'))
-        return null
-      }
-    },
-    [serverUrl, onError]
-  )
+  const getDraft = useCallback(async (id: string): Promise<Draft | null> => {
+    try {
+      const response = await fetch(`${serverUrl}/api/drafts/${id}`);
+      const result = await response.json();
+      return result.success ? result.data : null;
+    } catch (err) {
+      callbacksRef.current.onError?.(
+        err instanceof Error ? err : new Error('Failed to fetch draft')
+      );
+      return null;
+    }
+  }, [serverUrl]);
 
-  // 连接 WebSocket
+  // ---- 清理函数 ----
+  const cleanup = useCallback(() => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+      pingIntervalRef.current = null;
+    }
+  }, []);
+
+  // ---- 断开连接 ----
+  const disconnect = useCallback(() => {
+    cleanup();
+    isConnectingRef.current = false;
+    reconnectCountRef.current = 0;
+    if (wsRef.current) {
+      // 移除所有事件监听，防止 onclose 触发重连
+      wsRef.current.onopen = null;
+      wsRef.current.onmessage = null;
+      wsRef.current.onclose = null;
+      wsRef.current.onerror = null;
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setIsConnected(false);
+  }, [cleanup]);
+
+  // ---- 连接 WebSocket ----
   const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      return
+    // 防止并发连接
+    if (isConnectingRef.current) return;
+    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    if (!isMountedRef.current) return;
+
+    // 先清理旧连接
+    if (wsRef.current) {
+      wsRef.current.onopen = null;
+      wsRef.current.onmessage = null;
+      wsRef.current.onclose = null;
+      wsRef.current.onerror = null;
+      wsRef.current.close();
+      wsRef.current = null;
     }
+    cleanup();
 
-    // 构建 WebSocket URL
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host
-    const wsEndpoint = `${protocol}//${host}/api?userId=${userId}`
+    isConnectingRef.current = true;
+    console.log('[IdeaShu Sync] Connecting to', `${wsUrl}/api?userId=${userId}`);
 
-    console.log('[IdeaShu Sync] Connecting to', wsEndpoint)
-    const ws = new WebSocket(wsEndpoint)
-    wsRef.current = ws
+    const ws = new WebSocket(`${wsUrl}/api?userId=${userId}`);
+    wsRef.current = ws;
 
     ws.onopen = () => {
-      console.log('[IdeaShu Sync] Connected')
-      setIsConnected(true)
-      setError(null)
-      reconnectAttemptsRef.current = 0
-      onConnect?.()
+      if (!isMountedRef.current) {
+        ws.close();
+        return;
+      }
+      console.log('[IdeaShu Sync] Connected');
+      isConnectingRef.current = false;
+      reconnectCountRef.current = 0;
+      setIsConnected(true);
+      setError(null);
+      callbacksRef.current.onConnect?.();
 
-      // 连接后立即获取历史数据
-      refreshDrafts()
-    }
+      // 连接后获取历史数据
+      refreshDrafts();
+
+      // 启动心跳 ping（每 30 秒）
+      pingIntervalRef.current = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'ping' }));
+        }
+      }, 30000);
+    };
 
     ws.onmessage = (event) => {
       try {
-        const payload = JSON.parse(event.data)
-        console.log('[IdeaShu Sync] Received:', payload.type)
-
+        const payload = JSON.parse(event.data);
+        
         switch (payload.type) {
-          case 'draft_updated':
-            const draft: SyncDraft = payload.data
-            setLatestDraft(draft)
-            setDrafts((prev) => [draft, ...prev.filter((d) => d.id !== draft.id)])
-            onDraftUpdate?.(draft)
-            break
-
-          case 'topics_updated':
-            const topicsList: Topic[] = payload.data.topics || payload.data
-            setTopics(topicsList)
-            onTopicsUpdate?.(topicsList)
-            break
-
+          case 'draft_updated': {
+            const draft = payload.data;
+            setLatestDraft(draft);
+            setDrafts(prev => [draft, ...prev.filter(d => d.id !== draft.id)]);
+            callbacksRef.current.onDraftUpdate?.(draft);
+            break;
+          }
+          case 'topics_updated': {
+            const topicsList = payload.data.topics || payload.data;
+            setTopics(topicsList);
+            callbacksRef.current.onTopicsUpdate?.(topicsList);
+            break;
+          }
           case 'score_updated':
-            onScoreUpdate?.({
+            callbacksRef.current.onScoreUpdate?.({
               score: payload.data.score_data,
-              originality: payload.data.originality,
-            })
-            break
-
+              originality: payload.data.originality
+            });
+            break;
           case 'connected':
-            console.log('[IdeaShu Sync] Server acknowledged connection')
-            break
-
+            console.log('[IdeaShu Sync] Server acknowledged connection');
+            break;
           case 'pong':
-            // 心跳响应
-            break
+            break;
         }
       } catch (err) {
-        console.error('[IdeaShu Sync] Failed to parse message:', err)
+        console.error('[IdeaShu Sync] Failed to parse message:', err);
       }
-    }
+    };
 
     ws.onclose = () => {
-      console.log('[IdeaShu Sync] Disconnected')
-      setIsConnected(false)
-      onDisconnect?.()
+      if (!isMountedRef.current) return;
 
-      // 自动重连
-      if (autoConnect && reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
-        reconnectAttemptsRef.current++
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000)
-        console.log(`[IdeaShu Sync] Reconnecting in ${delay}ms... (attempt ${reconnectAttemptsRef.current})`)
-        
+      console.log('[IdeaShu Sync] Disconnected');
+      isConnectingRef.current = false;
+      setIsConnected(false);
+      cleanup();
+      callbacksRef.current.onDisconnect?.();
+
+      // 自动重连，带退避和上限
+      if (reconnectCountRef.current < MAX_RECONNECT) {
+        reconnectCountRef.current += 1;
+        const delay = Math.min(3000 * reconnectCountRef.current, 15000);
+        console.log(
+          `[IdeaShu Sync] Reconnect ${reconnectCountRef.current}/${MAX_RECONNECT} in ${delay}ms`
+        );
         reconnectTimeoutRef.current = setTimeout(() => {
-          connect()
-        }, delay)
+          if (isMountedRef.current) {
+            connect();
+          }
+        }, delay);
+      } else {
+        console.log('[IdeaShu Sync] Max reconnect reached, stopping. Call connect() to retry.');
+        setError(new Error('WebSocket 连接失败，已停止重连。请刷新页面重试。'));
       }
-    }
+    };
 
     ws.onerror = (err) => {
-      console.error('[IdeaShu Sync] WebSocket error:', err)
-      setError(new Error('WebSocket connection failed'))
-      onError?.(new Error('WebSocket connection failed'))
-    }
-  }, [userId, autoConnect, onConnect, onDisconnect, onError, onDraftUpdate, onTopicsUpdate, onScoreUpdate, refreshDrafts])
+      console.error('[IdeaShu Sync] WebSocket error:', err);
+      isConnectingRef.current = false;
+      // 不在这里 setError，让 onclose 统一处理
+    };
+  }, [wsUrl, userId, cleanup, refreshDrafts]);
 
-  // 断开连接
-  const disconnect = useCallback(() => {
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current)
-    }
-    if (wsRef.current) {
-      wsRef.current.close()
-      wsRef.current = null
-    }
-  }, [])
-
-  // 自动连接
+  // ---- 生命周期：只在 mount/unmount 时执行 ----
   useEffect(() => {
+    isMountedRef.current = true;
+
     if (autoConnect) {
-      connect()
+      connect();
     }
 
     return () => {
-      disconnect()
-    }
-  }, [autoConnect, connect, disconnect])
+      isMountedRef.current = false;
+      disconnect();
+    };
+    // 故意只在 mount/unmount 时执行，不依赖 connect/disconnect
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return {
     isConnected,
@@ -282,8 +321,8 @@ export function useIdeashuSync(options: UseIdeashuSyncOptions = {}): UseIdeashuS
     connect,
     disconnect,
     refreshDrafts,
-    getDraft,
-  }
+    getDraft
+  };
 }
 
-export default useIdeashuSync
+export default useIdeashuSync;

@@ -145,11 +145,19 @@ export default defineConfig({
   server: {
     host: '127.0.0.1',
     proxy: {
-      // IdeaShu Sync 服务代理
-      '/api': {
+      // IdeaShu Sync 服务 - 仅代理 HTTP 请求，不代理 WebSocket
+      // WebSocket 由前端直连 ws://localhost:3001，避免 Vite HMR 冲突
+      '/api/sync': {
         target: 'http://localhost:3001',
         changeOrigin: true,
-        ws: true, // 支持 WebSocket
+      },
+      '/api/drafts': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
+      '/api/health': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
       },
     },
   },

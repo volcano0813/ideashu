@@ -90,7 +90,7 @@ export default function HotCard({
   onDismiss: (id: string) => void
 }) {
   const navigate = useNavigate()
-  const { activeAccount } = useActiveAccount()
+  const { activeAccount, activeAccountId } = useActiveAccount()
   const trend = useMemo(() => trendBadge(topic.heat.trend), [topic.heat.trend])
   const primaryUrl = topic.source.primarySource.url?.trim() || ''
   const publishedAt = topic.source.primarySource.publishedAt?.trim()
@@ -173,7 +173,7 @@ export default function HotCard({
           <button
             type="button"
             onClick={() => {
-              setPendingDraft(draftFromHotTopic(topic, activeAccount.name))
+              setPendingDraft(activeAccountId, draftFromHotTopic(topic, activeAccount.name))
               navigate('/workspace')
             }}
             className="px-4 py-2 rounded-lg bg-text-main text-white font-extrabold text-[13px] hover:bg-black/80 transition-colors"

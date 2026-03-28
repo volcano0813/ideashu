@@ -1,8 +1,10 @@
 import { useMemo, useState } from 'react'
+import { useActiveAccount } from '../contexts/ActiveAccountContext'
 import { loadPosts } from '../lib/ideashuStorage'
 
 export default function DataTrackingPage() {
-  const posts = useMemo(() => loadPosts(), [])
+  const { activeAccountId } = useActiveAccount()
+  const posts = useMemo(() => loadPosts(activeAccountId), [activeAccountId])
   const [likes24h, setLikes24h] = useState(120)
 
   const totalEdits = useMemo(() => {

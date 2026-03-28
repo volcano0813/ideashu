@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useActiveAccount } from '../contexts/ActiveAccountContext'
 import { setPendingDraft } from '../lib/ideashuStorage'
 import type { Draft } from '../components/XhsPostEditor'
 
@@ -106,6 +107,7 @@ function draftFromSignal(sig: TrendSignal): Draft {
 
 export default function HotBoardPage() {
   const navigate = useNavigate()
+  const { activeAccountId } = useActiveAccount()
   const [minHeat, setMinHeat] = useState(40)
   const [lifecycle, setLifecycle] = useState<Lifecycle | 'all'>('all')
   const [source, setSource] = useState<'all' | string>('all')
@@ -220,7 +222,7 @@ export default function HotBoardPage() {
                       <button
                         type="button"
                         onClick={() => {
-                          setPendingDraft(draftFromSignal(sig))
+                          setPendingDraft(activeAccountId, draftFromSignal(sig))
                           navigate('/workspace')
                         }}
                         className="px-4 py-2 rounded-lg bg-primary text-white font-semibold text-sm hover:bg-primary/90 transition-colors"

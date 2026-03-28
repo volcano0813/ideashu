@@ -5,12 +5,44 @@ import {
   openclaw,
 } from '../lib/openclawSingleton'
 import { parseTopicsFromAssistantRaw, type TrendSignal } from '../lib/openclawClient'
-import FetchProgress from '../components/hotspot/FetchProgress'
 import FilterBar, { type HotspotSortKey } from '../components/hotspot/FilterBar'
 import HotCard from '../components/hotspot/HotCard'
 import { hotTopicFromTrendSignal, trendSignalInThreeDayWindow } from '../components/hotspot/hotspotViewModel'
 import { useActiveAccount } from '../contexts/ActiveAccountContext'
 import type { HotTopic } from '../types/hotspot'
+
+function hotspotCacheKey(accountId: string) {
+  return `ideashu.hotspot.cache.${accountId}.v1`
+}
+
+type HotspotCache = {
+  fetchedAt: string | null
+  signals: TrendSignal[]
+}
+
+function loadHotspotCache(accountId: string): HotspotCache {
+  if (!accountId) return { fetchedAt: null, signals: [] }
+  try {
+    const raw = localStorage.getItem(hotspotCacheKey(accountId))
+    if (!raw) return { fetchedAt: null, signals: [] }
+    const parsed = JSON.parse(raw) as Partial<HotspotCache>
+    return {
+      fetchedAt: typeof parsed.fetchedAt === 'string' ? parsed.fetchedAt : null,
+      signals: Array.isArray(parsed.signals) ? parsed.signals : [],
+    }
+  } catch {
+    return { fetchedAt: null, signals: [] }
+  }
+}
+
+function saveHotspotCache(accountId: string, cache: HotspotCache) {
+  if (!accountId) return
+  try {
+    localStorage.setItem(hotspotCacheKey(accountId), JSON.stringify(cache))
+  } catch {
+    // ignore quota / private mode
+  }
+}
 
 function relativeTimeLabel(iso: string | null) {
   if (!iso) return ''
@@ -74,12 +106,9 @@ export default function HotspotPage() {
   const [gatewayReady, setGatewayReady] = useState(false)
   const [connectAttempted, setConnectAttempted] = useState(false)
   const [sending, setSending] = useState(false)
-  const [progressStep, setProgressStep] = useState<number | null>(null)
-  const [fetchedAt, setFetchedAt] = useState<string | null>(null)
-  const [signals, setSignals] = useState<TrendSignal[]>([])
+  const [fetchedAt, setFetchedAt] = useState<string | null>(() => loadHotspotCache(activeAccountId).fetchedAt)
+  const [signals, setSignals] = useState<TrendSignal[]>(() => loadHotspotCache(activeAccountId).signals)
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => new Set())
-  const sentOnceRef = useRef(false)
-  const progressTimerRef = useRef<number | null>(null)
   const fetchTimeoutRef = useRef<number | null>(null)
   /** True after send「找热点」until we get topics (event) or parse from assistant_reply. */
   const hotspotAwaitingTopicsRef = useRef(false)
@@ -112,8 +141,15 @@ export default function HotspotPage() {
 
   /** 切换账号：与单例 openclaw 对齐网关状态，并重置自动抓取以便新账号领域再抓一次 */
   useEffect(() => {
-    sentOnceRef.current = false
     setGatewayReady(openclaw.isReady())
+    const cached = loadHotspotCache(activeAccountId)
+    setFetchedAt(cached.fetchedAt)
+    setSignals(cached.signals)
+    setDismissedIds(new Set())
+    setFetchError(null)
+    setSending(false)
+    clearFetchTimeout()
+    hotspotAwaitingTopicsRef.current = false
     let cancelled = false
     void ensureOpenClawConnected().finally(() => {
       if (cancelled) return
@@ -148,7 +184,6 @@ export default function HotspotPage() {
     setDeviceAuthOk(null)
     hotspotAwaitingTopicsRef.current = false
     setConnectAttempted(false)
-    sentOnceRef.current = false
     invalidateOpenClawConnectPromise()
     openclaw.disconnect()
     void ensureOpenClawConnected().finally(() => setConnectAttempted(true))
@@ -161,13 +196,10 @@ export default function HotspotPage() {
         clearFetchTimeout()
         setFetchError(null)
         setSignals(evt.topics)
-        setFetchedAt(new Date().toISOString())
+        const nextFetchedAt = new Date().toISOString()
+        setFetchedAt(nextFetchedAt)
+        saveHotspotCache(activeAccountId, { fetchedAt: nextFetchedAt, signals: evt.topics })
         setSending(false)
-        setProgressStep(null)
-        if (progressTimerRef.current) {
-          window.clearInterval(progressTimerRef.current)
-          progressTimerRef.current = null
-        }
         return
       }
       if (evt.type === 'assistant_reply' && hotspotAwaitingTopicsRef.current) {
@@ -177,13 +209,10 @@ export default function HotspotPage() {
           clearFetchTimeout()
           setFetchError(null)
           setSignals(parsed)
-          setFetchedAt(new Date().toISOString())
+          const nextFetchedAt = new Date().toISOString()
+          setFetchedAt(nextFetchedAt)
+          saveHotspotCache(activeAccountId, { fetchedAt: nextFetchedAt, signals: parsed })
           setSending(false)
-          setProgressStep(null)
-          if (progressTimerRef.current) {
-            window.clearInterval(progressTimerRef.current)
-            progressTimerRef.current = null
-          }
         } else {
           const raw = evt.rawFull ?? evt.text
           if (looksIncompleteJsonTopicsFence(raw)) {
@@ -193,11 +222,6 @@ export default function HotspotPage() {
           hotspotAwaitingTopicsRef.current = false
           clearFetchTimeout()
           setSending(false)
-          setProgressStep(null)
-          if (progressTimerRef.current) {
-            window.clearInterval(progressTimerRef.current)
-            progressTimerRef.current = null
-          }
           setFetchError(
             looksLikePlaceholderHotspotReply(raw)
               ? '助手只返回了占位话术（如「收到」「等待」），没有热点 JSON。请确认 ideashu-v5 Skill 生效，且每条 json:topics 含可追溯 https 链接（sourceUrl）。可点击「立即抓取」重试。'
@@ -207,20 +231,9 @@ export default function HotspotPage() {
       }
     })
     return () => unsub()
-  }, [])
+  }, [activeAccountId])
 
   const canFetch = gatewayReady && !sending
-
-  function startProgress() {
-    setProgressStep(0)
-    if (progressTimerRef.current) window.clearInterval(progressTimerRef.current)
-    progressTimerRef.current = window.setInterval(() => {
-      setProgressStep((cur) => {
-        if (cur == null) return 0
-        return Math.min(cur + 1, 3)
-      })
-    }, 900)
-  }
 
   const fetchHot = useCallback(() => {
     if (!openclaw.isReady()) return
@@ -235,11 +248,6 @@ export default function HotspotPage() {
       hotspotAwaitingTopicsRef.current = false
       setSending((cur) => {
         if (!cur) return cur
-        setProgressStep(null)
-        if (progressTimerRef.current) {
-          window.clearInterval(progressTimerRef.current)
-          progressTimerRef.current = null
-        }
         setFetchError(
           '抓取超时：仍未得到可用于热点列表的选题。请确认助手返回 json:topics 且每条含新闻/平台类 sourceUrl（https）。若网关已配置 OpenClaw 的 Google 搜索，请确认助手调用了检索；否则可在对话中手动附上信源链接后再试。',
         )
@@ -248,7 +256,6 @@ export default function HotspotPage() {
     }, 90_000)
     hotspotAwaitingTopicsRef.current = true
     setSending(true)
-    startProgress()
     const dRaw = (activeAccount.domain ?? '').trim()
     const d = dRaw.replace(/^\s*(领域|domain)\s*[:：=]\s*/i, '')
     // Skill 触发词：以「找热点 + 关键词/领域」贴近 ideashu-v5；末尾追加硬性输出要求以提高 json:topics 产出率
@@ -258,17 +265,8 @@ export default function HotspotPage() {
   }, [activeAccount.domain, activeAccountId])
 
   useEffect(() => {
-    if (!gatewayReady) return
-    if (sentOnceRef.current) return
-    sentOnceRef.current = true
-    // Defer to next tick to avoid cascading-render lint.
-    window.setTimeout(() => fetchHot(), 0)
-  }, [gatewayReady, fetchHot, activeAccountId])
-
-  useEffect(() => {
     return () => {
       clearFetchTimeout()
-      if (progressTimerRef.current) window.clearInterval(progressTimerRef.current)
     }
   }, [])
 
@@ -328,12 +326,6 @@ export default function HotspotPage() {
               </button>
             </div>
           </div>
-
-          {sending && progressStep != null ? (
-            <div className="mb-4">
-              <FetchProgress stepIndex={progressStep} />
-            </div>
-          ) : null}
 
           <div className="mb-4">
             <FilterBar

@@ -1,10 +1,12 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useActiveAccount } from '../contexts/ActiveAccountContext'
 import { loadStyleSamples } from '../lib/ideashuStorage'
 
 export default function StyleLearningPage() {
+  const { activeAccountId } = useActiveAccount()
   // Style samples are saved locally from "待发布库" posts.
   // Mock-learning UI is kept; gating is driven by the real count.
-  const [samples, setSamples] = useState(() => loadStyleSamples())
+  const [samples, setSamples] = useState(() => loadStyleSamples(activeAccountId))
   const [learning, setLearning] = useState(false)
   const [learnedAt, setLearnedAt] = useState<string | null>(null)
 
@@ -12,8 +14,14 @@ export default function StyleLearningPage() {
   const canLearn = sampleCount >= 10
 
   function refresh() {
-    setSamples(loadStyleSamples())
+    setSamples(loadStyleSamples(activeAccountId))
   }
+
+  useEffect(() => {
+    refresh()
+    setLearning(false)
+    setLearnedAt(null)
+  }, [activeAccountId])
 
   async function handleLearn() {
     if (!canLearn || learning) return

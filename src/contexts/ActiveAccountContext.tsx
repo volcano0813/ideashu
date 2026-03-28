@@ -7,9 +7,9 @@ import {
   type ReactNode,
 } from 'react'
 import { createNewAccount, stripAccountNameAsterisks, type Account } from '../lib/accounts'
-import { loadAccounts, saveAccounts } from '../lib/ideashuStorage'
+import { ACTIVE_ACCOUNT_KEY, loadAccounts, saveAccounts } from '../lib/ideashuStorage'
 
-export const ACTIVE_ACCOUNT_KEY = 'ideashu.activeAccountId.v1'
+export { ACTIVE_ACCOUNT_KEY }
 
 export type AccountProfileInput = {
   name: string

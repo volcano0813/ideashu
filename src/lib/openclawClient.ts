@@ -249,7 +249,54 @@ export function mergeStreamTextChunk(buffer: string, chunk: string): string {
   if (!chunk) return buffer
   if (!buffer) return chunk
   if (chunk.startsWith(buffer)) return chunk
+  if (buffer.startsWith(chunk)) return buffer
+  if (buffer.endsWith(chunk)) return buffer
+  if (chunk.endsWith(buffer)) return chunk
+
+  const max = Math.min(buffer.length, chunk.length)
+  for (let len = max; len >= 1; len--) {
+    if (chunk.startsWith(buffer.slice(buffer.length - len))) {
+      return buffer + chunk.slice(len)
+    }
+  }
   return buffer + chunk
+}
+
+/** When the merged buffer is literally two identical halves (bad concat / duplicate frame), keep one. */
+function collapseDoubledAssistantProse(s: string): string {
+  let t = s.trim()
+  for (let i = 0; i < 6; i++) {
+    if (t.length < 120) break
+    const half = Math.floor(t.length / 2)
+    const a = t.slice(0, half)
+    const b = t.slice(half)
+    const na = a.replace(/\s+/g, ' ').trim()
+    const nb = b.replace(/\s+/g, ' ').trim()
+    if (na.length >= 60 && na === nb) {
+      t = a.trimEnd()
+      continue
+    }
+    break
+  }
+  return t
+}
+
+/** Drop consecutive duplicate blocks (streaming/gateway may replay the same section). Long blocks only. */
+function collapseConsecutiveDuplicateParagraphs(s: string, minBlockChars = 45): string {
+  const blocks = s.split(/\n{2,}/)
+  const out: string[] = []
+  const norm = (x: string) => x.replace(/\s+/g, ' ').trim()
+  for (const b of blocks) {
+    const t = b.trim()
+    if (!t) continue
+    if (t.length < minBlockChars) {
+      out.push(t)
+      continue
+    }
+    if (out.length > 0 && norm(out[out.length - 1]!) === norm(t)) continue
+    out.push(t)
+  }
+  return out.join('\n\n')
 }
 
 function extractTaggedJSON(raw: string, tag: string): unknown | null {
@@ -878,22 +925,27 @@ export function parseTopicsFromAssistantRaw(raw: string): TrendSignal[] | null {
 }
 
 function assistantTextFromRecord(obj: Record<string, unknown>): string {
-  const parts: string[] = []
-  if (typeof obj.text === 'string') parts.push(obj.text)
-  if (typeof obj.content === 'string') parts.push(obj.content)
-  if (typeof obj.delta === 'string') parts.push(obj.delta)
-  if (typeof obj.output === 'string') parts.push(obj.output)
+  /** Same frame may repeat prose in `text` + `delta` (cumulative vs delta); never concat blindly. */
+  const slices: string[] = []
+  if (typeof obj.text === 'string') slices.push(obj.text)
+  if (typeof obj.content === 'string') slices.push(obj.content)
+  if (typeof obj.delta === 'string') slices.push(obj.delta)
+  if (typeof obj.output === 'string') slices.push(obj.output)
   const partList = obj.parts
   if (Array.isArray(partList)) {
     for (const part of partList) {
       if (part && typeof part === 'object') {
         const pr = part as Record<string, unknown>
-        if (typeof pr.text === 'string') parts.push(pr.text)
-        if (typeof pr.content === 'string') parts.push(pr.content)
+        if (typeof pr.text === 'string') slices.push(pr.text)
+        if (typeof pr.content === 'string') slices.push(pr.content)
       }
     }
   }
-  return parts.join('')
+  let acc = ''
+  for (const chunk of slices) {
+    acc = mergeStreamTextChunk(acc, chunk)
+  }
+  return acc
 }
 
 /**
@@ -1205,12 +1257,6 @@ export function createOpenClawClient({
   /** Same assistant body sometimes gets flushed twice (e.g. duplicate `chat` events); skip second emit. */
   let lastAssistantRawFingerprint: string | null = null
 
-  /**
-   * Gateway may emit several frames with different raw payloads (e.g. refreshed ```json:draft```) but identical
-   * user-visible prose after stripping machine JSON — that produced multiple identical Agent bubbles.
-   */
-  let lastAssistantDisplayFingerprint: string | null = null
-
   /** reply identity used to update the same chat bubble record instead of pushing duplicates */
   let activeAssistantReplyId: string | null = null
   let fallbackAssistantReplySeq = 0
@@ -1218,11 +1264,14 @@ export function createOpenClawClient({
   /** Same visible prose after strip but `raw` grew (e.g. ```json:topics``` finished streaming) — still emit so Hotspot can parse final rawFull. */
   const lastRawFullEmittedByReplyId = new Map<string, string>()
 
+  /** Skip `assistant_reply` when visible text matches last emit for this replyId (e.g. agent idle flush + chat+message). */
+  const lastEmittedDisplayNormByReplyId = new Map<string, string>()
+
   function resetAssistantDedupe() {
     lastAssistantRawFingerprint = null
-    lastAssistantDisplayFingerprint = null
     activeAssistantReplyId = null
     lastRawFullEmittedByReplyId.clear()
+    lastEmittedDisplayNormByReplyId.clear()
   }
 
   function deriveReplyIdFromPayload(payload: unknown): string | null {
@@ -1278,20 +1327,19 @@ export function createOpenClawClient({
     // is present in the same raw payload.
     emitJsonBlocksFromBuffer(raw, emit)
 
-    const displayText = stripMachineJsonFromChatDisplay(raw)
+    let displayText = stripMachineJsonFromChatDisplay(raw)
+    displayText = collapseDoubledAssistantProse(displayText)
+    displayText = collapseConsecutiveDuplicateParagraphs(displayText)
     const displayNorm = displayText.replace(/\s+/g, ' ').trim()
     let emittedVisible = false
     if (displayNorm.length > 0) {
-      const displayKey = `${replyId}::${displayNorm}`
-      const prevRawForReply = lastRawFullEmittedByReplyId.get(replyId)
-      const rawGrew = prevRawForReply !== raw
-      if (displayKey === lastAssistantDisplayFingerprint && !rawGrew) {
+      const prevNorm = lastEmittedDisplayNormByReplyId.get(replyId)
+      if (prevNorm === displayNorm) {
+        lastRawFullEmittedByReplyId.set(replyId, raw)
         // eslint-disable-next-line no-console
-        console.warn('[openclawClient] skip duplicate assistant_reply (same visible text after strip, same raw)')
+        console.warn('[openclawClient] skip duplicate assistant_reply (same visible text for replyId; raw may differ)')
       } else {
-        if (displayKey !== lastAssistantDisplayFingerprint) {
-          lastAssistantDisplayFingerprint = displayKey
-        }
+        lastEmittedDisplayNormByReplyId.set(replyId, displayNorm)
         lastRawFullEmittedByReplyId.set(replyId, raw)
         emittedVisible = true
         emit({ type: 'assistant_reply', replyId, text: displayText, rawFull: raw })
@@ -1304,13 +1352,13 @@ export function createOpenClawClient({
       const hasMachineJson = /```json:\w+/.test(raw) || /\bjson:\w+\b/.test(raw)
       if (hasMachineJson) {
         const fallback = '已生成结果（草稿/评分/原创度已更新）。'
-        const displayKey = `${replyId}::${fallback}`
-        const prevRawForReply = lastRawFullEmittedByReplyId.get(replyId)
-        const rawGrew = prevRawForReply !== raw
-        if (displayKey !== lastAssistantDisplayFingerprint || rawGrew) {
-          lastAssistantDisplayFingerprint = displayKey
+        const fbNorm = fallback.replace(/\s+/g, ' ').trim()
+        if (lastEmittedDisplayNormByReplyId.get(replyId) !== fbNorm) {
+          lastEmittedDisplayNormByReplyId.set(replyId, fbNorm)
           lastRawFullEmittedByReplyId.set(replyId, raw)
           emit({ type: 'assistant_reply', replyId, text: fallback, rawFull: raw })
+        } else {
+          lastRawFullEmittedByReplyId.set(replyId, raw)
         }
       }
     }
