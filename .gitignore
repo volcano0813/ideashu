@@ -11,7 +11,15 @@ node_modules
 dist
 dist-ssr
 *.local
+# Env
+.env
 
+# Sync runtime data
+sync/data.json
+
+# User brand voice files (keep directory via .gitkeep)
+skill/brand-voices/*
+!skill/brand-voices/.gitkeep
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

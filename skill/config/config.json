@@ -1,0 +1,75 @@
+{
+  "sync": {
+    "serverUrl": "http://localhost:3001",
+    "clientPath": "../sync/sync-client.js",
+    "defaultUserId": "default"
+  },
+  "hotSearch": {
+    "sources": {
+      "googleXiaohongshu": {
+        "enabled": true,
+        "priority": 1,
+        "tool": "web_fetch",
+        "urlTemplate": "https://www.google.com/search?q=site:xiaohongshu.com+{keywords}&tbs=qdr:w",
+        "note": "间接发现小红书热门内容"
+      },
+      "weibo": {
+        "enabled": true,
+        "priority": 2,
+        "tool": "agent-browser",
+        "url": "https://s.weibo.com/top/summary"
+      },
+      "baidu": {
+        "enabled": true,
+        "priority": 3,
+        "tool": "agent-browser",
+        "url": "https://top.baidu.com/board"
+      },
+      "zhihu": {
+        "enabled": true,
+        "priority": 4,
+        "tool": "agent-browser",
+        "url": "https://www.zhihu.com/hot"
+      },
+      "googleTrends": {
+        "enabled": true,
+        "priority": 5,
+        "tool": "web_fetch",
+        "url": "https://trends.google.com/trending?geo=CN&hl=zh-CN"
+      },
+      "github": {
+        "enabled": true,
+        "priority": 6,
+        "tool": "web_fetch",
+        "url": "https://github.com/trending?since=daily",
+        "note": "仅技术类账号启用"
+      }
+    },
+    "scoring": {
+      "weights": {
+        "crossSource": 0.30,
+        "freshness": 0.25,
+        "domainMatch": 0.25,
+        "contentSpace": 0.20
+      },
+      "minScore": 50,
+      "freshnessRules": {
+        "6h": 25,
+        "24h": 20,
+        "3d": 10
+      }
+    },
+    "output": {
+      "minTopics": 5,
+      "maxTopics": 8
+    }
+  },
+  "cover": {
+    "apiEndpoint": "https://api.siliconflow.cn/v1/images/generations",
+    "model": "Kwai-Kolors/Kolors",
+    "defaultImageSize": "768x1024",
+    "defaultSteps": 30,
+    "defaultGuidance": 7.5,
+    "defaultStrength": 0.65
+  }
+}
