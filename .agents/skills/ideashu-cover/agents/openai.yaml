@@ -1,0 +1,4 @@
+interface:
+  display_name: "IdeaShu Cover"
+  short_description: "Plan and compose editable IdeaShu covers"
+  default_prompt: "Use $ideashu-cover to create text-free backgrounds and editable Chinese cover compositions."

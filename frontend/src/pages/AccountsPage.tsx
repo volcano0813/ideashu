@@ -1,155 +1,82 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
+import { idempotencyKey, mutation } from '../api/client'
+import type { Account } from '../api/contracts'
 import { useActiveAccount } from '../contexts/ActiveAccountContext'
 
+type FormState = { name: string; domain: string; persona: string; tone: string; styleName: string }
+const empty: FormState = { name: '', domain: '', persona: '', tone: '', styleName: '' }
+
 export default function AccountsPage() {
-  const { accounts, activeAccountId, setActiveAccountId, addAccount, deleteAccount } =
-    useActiveAccount()
-  const [newName, setNewName] = useState('')
-  const [showNew, setShowNew] = useState(false)
+  const { accounts, activeAccount, setActiveAccountId, refresh } = useActiveAccount()
+  const [form, setForm] = useState<FormState>(empty)
+  const [editing, setEditing] = useState<Account | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
 
-  const selected = useMemo(
-    () => accounts.find((a) => a.id === activeAccountId) ?? accounts[0],
-    [accounts, activeAccountId],
-  )
-
-  function handleCreate() {
-    const name = newName.trim() || '新账号'
-    addAccount(name)
-    setNewName('')
-    setShowNew(false)
+  const openEdit = (account: Account) => {
+    setEditing(account)
+    setForm({ name: account.name, domain: account.domain, persona: account.persona, tone: account.tone, styleName: account.styleName })
   }
-
-  function handleDelete() {
-    if (!selected || accounts.length <= 1) return
-    if (!window.confirm(`确定删除账号「${selected.name}」？此操作不可撤销。`)) return
-    deleteAccount(selected.id)
+  const reset = () => { setEditing(null); setForm(empty) }
+  const save = async () => {
+    if (!form.name.trim()) return
+    setBusy(true)
+    try {
+      if (editing) {
+        await mutation(`/accounts/${editing.id}`, 'PATCH', { ...form, expectedRevision: editing.revision, idempotencyKey: idempotencyKey() })
+        setMessage('账号画像已保存，新任务会使用更新后的上下文。')
+      } else {
+        const created = await mutation<Account>('/accounts', 'POST', { ...form, idempotencyKey: idempotencyKey() })
+        setActiveAccountId(created.id)
+        setMessage('账号已创建。')
+      }
+      reset()
+      await refresh()
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '保存失败')
+    } finally { setBusy(false) }
+  }
+  const remove = async (account: Account) => {
+    if (!confirm(`软删除账号“${account.name}”？历史数据仍保留在本地数据库中。`)) return
+    setBusy(true)
+    try {
+      await mutation(`/accounts/${account.id}`, 'DELETE', { expectedRevision: account.revision, idempotencyKey: idempotencyKey() })
+      await refresh()
+    } catch (error) { setMessage(error instanceof Error ? error.message : '删除失败') }
+    finally { setBusy(false) }
   }
 
   return (
-    <div className="p-8 overflow-hidden bg-canvas min-h-full font-sans">
-      <div className="flex items-center justify-between gap-4 mb-4">
-        <div>
-          <h1 className="text-2xl font-bold">账号管理</h1>
-          <div className="text-sm text-text-secondary mt-1">
-            账号列表会保存在本机浏览器；顶部导航可切换当前账号。
-          </div>
-        </div>
-        {!showNew ? (
-          <button
-            className="px-5 py-2 rounded-[10px] bg-primary text-white font-semibold text-sm hover:bg-primary/90"
-            type="button"
-            onClick={() => setShowNew(true)}
-          >
-            新建账号
-          </button>
-        ) : (
-          <div className="flex items-center gap-2 flex-wrap justify-end">
-            <input
-              className="w-[200px] px-3 py-2 rounded-lg border border-border-muted bg-surface text-sm outline-none focus:ring-2 focus:ring-primary/20"
-              placeholder="账号名称"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleCreate()
-                if (e.key === 'Escape') {
-                  setShowNew(false)
-                  setNewName('')
-                }
-              }}
-              autoFocus
-            />
-            <button
-              className="px-4 py-2 rounded-[10px] bg-primary text-white font-semibold text-sm hover:bg-primary/90"
-              type="button"
-              onClick={handleCreate}
-            >
-              添加
-            </button>
-            <button
-              className="px-4 py-2 rounded-[10px] border border-border-muted text-text-secondary font-semibold text-sm hover:border-text-main/20 hover:text-text-main"
-              type="button"
-              onClick={() => {
-                setShowNew(false)
-                setNewName('')
-              }}
-            >
-              取消
-            </button>
-          </div>
-        )}
+    <section>
+      <div className="page-heading">
+        <div><span className="eyebrow">IDENTITY BOUNDARY</span><h1>账号不是标签，<em>是数据边界。</em></h1><p>每个创作任务会永久锁定一个账号，素材、草稿、封面和作品不会跨号混用。</p></div>
+        <button className="primary" onClick={() => { reset(); setMessage('') }}>＋ 新建账号</button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6">
-        <div className="space-y-3">
-          {accounts.map((a) => (
-            <button
-              key={a.id}
-              type="button"
-              onClick={() => setActiveAccountId(a.id)}
-              className={
-                a.id === activeAccountId
-                  ? 'w-full text-left rounded-2xl border border-primary/40 bg-primary/5 p-4'
-                  : 'w-full text-left rounded-2xl border border-border-muted bg-surface p-4 hover:border-primary/35 hover:bg-canvas transition-colors'
-              }
-            >
-              <div className="text-sm font-black text-text-main">{a.name}</div>
-              <div className="text-xs text-text-secondary mt-1">领域：{a.domain}</div>
-              <div className="text-xs text-text-secondary mt-1">人设：{a.persona}</div>
-            </button>
-          ))}
-        </div>
-
-        <div className="bg-surface border border-border-muted rounded-2xl p-6 overflow-hidden">
-          <div className="text-sm font-bold">{selected ? selected.name : '—'}</div>
-          <div className="text-sm text-text-secondary mt-2">领域：{selected?.domain}</div>
-          <div className="text-sm text-text-secondary mt-1">人设：{selected?.persona}</div>
-          <div className="text-sm text-text-secondary mt-1">
-            口头禅：{selected?.catchPhrases?.join(' / ') ?? '—'}
-          </div>
-          <div className="text-sm text-text-secondary mt-1">调性：{selected?.tone ?? selected?.styleName ?? '—'}</div>
-          <div className="text-sm text-text-secondary mt-1">风格：{selected?.styleName}</div>
-
-          <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="rounded-xl border border-border-muted bg-canvas/60 p-4">
-              <div className="text-xs font-bold text-text-secondary">已学习规则</div>
-              <div className="text-3xl font-black text-text-main mt-1">{selected?.learnedRules ?? 0}</div>
-            </div>
-            <div className="rounded-xl border border-border-muted bg-canvas/60 p-4">
-              <div className="text-xs font-bold text-text-secondary">趋势来源</div>
-              <div className="text-3xl font-black text-text-main mt-1">{selected?.trendSources ?? 0}</div>
-            </div>
-          </div>
-
-          <div className="mt-5 space-y-3">
-            <div className="text-sm font-bold">品牌人设与语言风格（占位）</div>
-            <textarea
-              className="w-full min-h-[120px] px-3 py-2 rounded-lg border border-border-muted bg-white text-sm outline-none focus:ring-2 focus:ring-primary/20"
-              placeholder="用于编辑 brand-voice 配置（Phase 2：ws 提取风格/禁区等）"
-              defaultValue=""
-            />
-            <div className="flex gap-3 flex-wrap items-center">
-              <button
-                className="px-4 py-2 rounded-lg border border-red-200 text-red-700 font-semibold hover:bg-red-50 disabled:opacity-40 disabled:pointer-events-none"
-                type="button"
-                disabled={accounts.length <= 1}
-                onClick={handleDelete}
-                title={accounts.length <= 1 ? '至少保留一个账号' : undefined}
-              >
-                删除当前账号
-              </button>
-              <button className="px-4 py-2 rounded-lg bg-text-main text-white font-semibold hover:bg-text-main/90" type="button">
-                保存
-              </button>
-              <button className="px-4 py-2 rounded-lg border border-border-muted text-text-secondary font-semibold hover:border-text-main/20 hover:text-text-main" type="button">
-                导出 brand-voice .md
-              </button>
-            </div>
-            <div className="text-xs text-text-secondary">
-              导入已有笔记 / 导出文件 / ws 适配将在 `ws-adapter` 待办完成后接入。
-            </div>
-          </div>
-        </div>
+      <div className="account-grid">
+        {accounts.map((account) => (
+          <article className={`account-card ${activeAccount?.id === account.id ? 'selected' : ''}`} key={account.id}>
+            <div className="account-monogram">{account.name.slice(0, 1)}</div>
+            <div className="card-head"><div><small>{account.domain || '尚未设置领域'}</small><h2>{account.name}</h2></div><span className="revision">R{account.revision}</span></div>
+            <p>{account.persona || '补充账号人设，智能体才知道以谁的视角表达。'}</p>
+            <dl><div><dt>语气</dt><dd>{account.tone || '未设置'}</dd></div><div><dt>风格</dt><dd>{account.styleName || '未设置'}</dd></div></dl>
+            <div className="card-actions"><button onClick={() => setActiveAccountId(account.id)}>设为当前</button><button onClick={() => openEdit(account)}>编辑画像</button><button className="danger" onClick={() => void remove(account)} disabled={busy}>删除</button></div>
+          </article>
+        ))}
+        {!accounts.length && <div className="empty-state"><span>01</span><h2>先建立第一个内容账号</h2><p>系统不会自动注入演示账号，避免真实任务误用虚假人设。</p></div>}
       </div>
-    </div>
+
+      <div className="editor-panel">
+        <div className="panel-title"><span>{editing ? 'EDIT PROFILE' : 'NEW PROFILE'}</span><h2>{editing ? `编辑 ${editing.name}` : '建立账号上下文'}</h2></div>
+        <div className="form-grid">
+          <label>账号名称<input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="例如：Elia 的 AI 实践" /></label>
+          <label>内容领域<input value={form.domain} onChange={(e) => setForm({ ...form, domain: e.target.value })} placeholder="AI / 产品 / 创业" /></label>
+          <label>视觉或写作风格<input value={form.styleName} onChange={(e) => setForm({ ...form, styleName: e.target.value })} placeholder="实践笔记、克制留白" /></label>
+          <label>表达语气<input value={form.tone} onChange={(e) => setForm({ ...form, tone: e.target.value })} placeholder="专业但不高冷" /></label>
+          <label className="wide">账号人设<textarea value={form.persona} onChange={(e) => setForm({ ...form, persona: e.target.value })} placeholder="经历、立场、目标读者、不能说的话…" /></label>
+        </div>
+        <div className="panel-footer"><span>{message}</span><div><button onClick={reset}>清空</button><button className="primary" onClick={() => void save()} disabled={busy || !form.name.trim()}>{busy ? '保存中…' : '保存账号'}</button></div></div>
+      </div>
+    </section>
   )
 }

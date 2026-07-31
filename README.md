@@ -1,79 +1,104 @@
-# IdeaShu 灵感书
+# IdeaShu
 
-小红书图文创作增强工具。AI 辅助你完成从热点发现、素材整理到内容打磨的全流程。
+IdeaShu is a local-first content control plane. A React website handles accounts, materials, workflow state, immutable revisions, cover composition, and human approvals. Codex, WorkBuddy, or another desktop host connects through one stdio MCP server and remains replaceable.
 
-## 功能
+## Phase 1 boundary
 
-- 多账号矩阵管理（每个账号独立的 brand-voice 风格配置）
-- 热点抓取（多源聚合 → 选题卡片 → 一键写稿）
-- 素材银行（图文素材存储 + 语义匹配）
-- AI 草稿生成（风格学习飞轮 + 原创度声明）
-- 封面生成（文生图 / 图生图）
-- 飞书同步（可选）
+- Windows 10/11, PowerShell, and Node `>=22.13 <23`.
+- One local operator and workspace, with multiple isolated content accounts.
+- SQLite is the only business source of truth; runtime data lives under `.ideashu/` and is never committed.
+- Three human gates: topic, exact draft revision, exact QA-passed cover.
+- Cover generation separates text-free backgrounds from deterministic editable Chinese SVG composition.
+- Provider keys are optional. Without one, the local gradient renderer still produces a valid cover; it does not pretend an AI background was generated.
+- Codex or WorkBuddy installation and sign-in are not performed by this repository.
 
-## 前置要求
-
-- Node.js >= 18
-- Python >= 3.10
-- [OpenClaw](https://openclaw.ai/)（按官方文档安装与配置）
-- SiliconFlow API Key（可选，用于封面生成）
-
-## 安装
-
-### 方式一：PowerShell 一键配置
-
-在仓库根目录执行：
+## Install and start
 
 ```powershell
+git clone https://github.com/volcano0813/ideashu.git
+cd ideashu
 .\setup.ps1
+npm start
 ```
 
-脚本会检查 Node/Python、安装前端依赖、从 `.env.example` 生成 `.env`（若不存在），并尝试将 `skill` 目录符号链接到 `%USERPROFILE%\.openclaw\workspace\skills\ideashu-v5`。若符号链接失败（权限不足），请用**管理员**打开 PowerShell，或开启 Windows「开发者模式」，或**手动**将 `skill` 文件夹复制到上述路径。
+Open [http://127.0.0.1:3210](http://127.0.0.1:3210). The production service binds only to loopback and serves the built SPA plus `/api/v1` from the same origin.
 
-### 方式二：手动安装
+For development, run `npm run dev`; the Vite UI runs on `127.0.0.1:5173` and proxies only `/api` to the local service.
 
-1. `git clone` 本仓库并进入根目录。
-2. 安装前端依赖：`cd frontend && npm install`
-3. 安装同步服务依赖：`cd ../sync && npm install`
-4. 将本仓库的 `skill` 目录**复制或符号链接**到 OpenClaw workspace：`%USERPROFILE%\.openclaw\workspace\skills\ideashu-v5`
-5. 复制 `.env.example` 为根目录 `.env`，按需填写 `SILICONFLOW_API_KEY`、`OPENCLAW_WORKSPACE`（把 `YOUR_USERNAME` 换成你的 Windows 用户名）等。  
-   **说明**：请用 **UTF-8（无 BOM）** 保存 `.env`（VS Code 右下角编码可选）。若曾用错误编码保存，中文注释会乱码；模板现为英文注释，变量名不受影响。
+## Connect Codex or WorkBuddy
 
-## 使用
+Run `npm run bootstrap` to print the exact absolute MCP command. The host configuration shape is:
 
-### 启动服务
+```json
+{
+  "mcpServers": {
+    "ideashu": {
+      "command": "node",
+      "args": ["D:/ABSOLUTE/PATH/ideashu/server/src/mcp.js"]
+    }
+  }
+}
+```
 
-- **前端开发**：`cd frontend && npm run dev`
-- **同步服务（可选）**：在仓库根目录执行 `node sync/server.js`（需先 `cd sync && npm install`）
-- 打开 OpenClaw，确认 **ideashu** Skill 已加载（`skills/ideashu-v5` 指向本仓库 `skill`）
+Start IdeaShu with `npm start` before the host calls MCP. The MCP server can start from any current directory, reads its local token from `.ideashu/runtime`, writes no logs to stdout, and exposes no approval or publishing tools.
 
-### 基本流程
+The repository includes:
 
-1. 新建账号 → 冷启动配置 brand-voice  
-2. 找热点 → 选方向 → 生成草稿  
-3. 编辑打磨 → 评分 → 封面生成  
-4. 保存到作品集  
+- `.agents/skills/ideashu-create`
+- `.agents/skills/ideashu-review`
+- `.agents/skills/ideashu-cover`
 
-### 配置说明
+See [desktop host details](docs/agent-hosts.md).
 
-- **`skill/config/config.json`**：`sync.clientPath` 默认为 `../sync/sync-client.js`（相对 **Skill 根目录**）。若仓库位置与 OpenClaw 安装不同，请改为本机上的绝对路径或正确相对路径。`serverUrl` 默认为 `http://localhost:3001`；若修改 `SYNC_PORT`，须同步修改此处与前端 [`frontend/src/hooks/useIdeashuSync.ts`](frontend/src/hooks/useIdeashuSync.ts) 中的默认地址（或保持端口 3001 不变）。
-- **`OPENCLAW_WORKSPACE`**：同步服务启动时会在日志中打印（若已设置），便于排查路径问题。
+## Legacy data migration
 
-## 项目结构
+The website's **旧数据导出** page downloads a read-only browser backup with one SHA-256 per original localStorage value. It never deletes browser data.
 
-| 目录 | 说明 |
-|------|------|
-| `skill/` | OpenClaw Skill（`SKILL.md`、Python 脚本、`config/config.json`）；用户需链接或复制到 workspace |
-| `frontend/` | React + Vite 前端 |
-| `sync/` | Node.js WebSocket/HTTP 同步服务，连接飞书侧与本地前端 |
+Create an explicit account mapping:
 
-## 技术栈
+```json
+{
+  "legacy-account-id": "new-ideashu-account-uuid",
+  "default": "new-ideashu-account-uuid"
+}
+```
 
-- 前端：React + TypeScript + Tailwind CSS + Vite
-- Skill：OpenClaw `SKILL.md` + Python 脚本
-- 同步：Node.js WebSocket 服务
-- 封面：SiliconFlow API（Kolors 模型）
+Dry-run first:
 
-## License
+```powershell
+npm run migrate:legacy -- --source .\browser-export.json --mapping .\mapping.json
+```
 
-MIT — 见 [LICENSE](LICENSE)。
+Apply only after the report has no quarantined or ambiguous records:
+
+```powershell
+npm run migrate:legacy -- --source .\browser-export.json --mapping .\mapping.json --apply
+```
+
+The same command recognizes the old `sync/data.json` shape. Apply creates a SHA-named source backup under `.ideashu/migration-backups`, imports all records in one database transaction, deduplicates by account and content hash, and never copies unscoped data to every account.
+
+## Verification
+
+```powershell
+npm run verify
+```
+
+This runs frontend/server lint, TypeScript, unit and integration tests, MCP stdio handshake, account-isolation and migration cases, production build, and local diagnostics.
+
+Useful commands:
+
+```powershell
+npm run doctor
+npm run test:integration
+npm run build
+```
+
+## Security model
+
+- API listens only on `127.0.0.1`.
+- Browser access uses a same-origin HttpOnly local session; desktop agents use a separate bearer token kept outside the frontend and database.
+- Origin checks reject unrelated web pages; account-scoped composite foreign keys prevent accidental cross-account references.
+- Draft revisions and publish packages are immutable; writes require idempotency keys and optimistic revisions.
+- Local authentication prevents accidental access and browser cross-origin attacks. It does not defend against malicious software already running as the same operating-system user.
+
+If startup fails, confirm Node is in the supported release line, run `npm run doctor`, and verify port `3210` is free. Runtime files and credentials are not part of a clone and are regenerated locally.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "IdeaShu Review"
+  short_description: "Review one immutable IdeaShu draft revision"
+  default_prompt: "Use $ideashu-review to review the latest IdeaShu draft revision without approving it."

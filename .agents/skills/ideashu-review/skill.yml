@@ -1,0 +1,6 @@
+name: ideashu-review
+version: 1.0.0
+description: Review an exact IdeaShu draft revision without approving it.
+entrypoint: SKILL.md
+requires:
+  mcp_servers: [ideashu]

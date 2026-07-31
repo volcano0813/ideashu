@@ -1,0 +1,27 @@
+{
+  "name": "ideashu",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "frontend",
+    "server"
+  ],
+  "engines": {
+    "node": ">=22.13 <23"
+  },
+  "scripts": {
+    "bootstrap": "node server/src/bootstrap.js",
+    "dev": "node server/src/dev.js",
+    "start": "node server/src/index.js",
+    "build": "npm run build --workspace frontend",
+    "typecheck": "npm run typecheck --workspace frontend",
+    "lint": "npm run lint --workspace frontend && npm run lint --workspace server",
+    "test": "npm run test --workspace server && npm run test --workspace frontend",
+    "test:integration": "npm run test:integration --workspace server",
+    "doctor": "node server/src/doctor.js",
+    "mcp": "node server/src/mcp.js",
+    "migrate:legacy": "node server/src/legacy.js",
+    "verify": "npm run lint && npm run typecheck && npm run test && npm run test:integration && npm run build && npm run doctor"
+  }
+}

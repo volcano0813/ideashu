@@ -1,39 +1,23 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
-import Phase1Layout from '../components/Phase1Layout'
-import Phase2Layout from '../components/Phase2Layout'
-import WorkspacePage from '../pages/WorkspacePage'
-import MaterialBankPage from '../pages/MaterialBankPage'
-import HotBoardPage from '../pages/HotBoardPage'
+import Shell from '../components/Shell'
 import AccountsPage from '../pages/AccountsPage'
-import StyleLearningPage from '../pages/StyleLearningPage'
-import KnowledgeBasePage from '../pages/KnowledgeBasePage'
-import SettingsPage from '../pages/SettingsPage'
-import DataTrackingPage from '../pages/DataTrackingPage'
-import HotFetchPage from '../pages/HotFetchPage'
+import MaterialsPage from '../pages/MaterialsPage'
+import CreatePage from '../pages/CreatePage'
+import WorksPage from '../pages/WorksPage'
+import MigrationPage from '../pages/MigrationPage'
 
 export default function AppRouter() {
-  return (
-    <BrowserRouter>
-      <Routes>
-        <Route element={<Phase1Layout />}>
-          <Route path="/" element={<Navigate to="/workspace" replace />} />
-          <Route path="/workspace" element={<WorkspacePage />} />
-          <Route path="/hot-fetch" element={<HotFetchPage />} />
-          <Route path="/material-bank" element={<MaterialBankPage />} />
-          <Route path="/knowledge-base" element={<KnowledgeBasePage />} />
-        </Route>
-
-        <Route element={<Phase2Layout />}>
-          <Route path="/hot-board" element={<HotBoardPage />} />
-          <Route path="/accounts" element={<AccountsPage />} />
-          <Route path="/style-learning" element={<StyleLearningPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/data-tracking" element={<DataTrackingPage />} />
-        </Route>
-
-        <Route path="*" element={<Navigate to="/workspace" replace />} />
-      </Routes>
-    </BrowserRouter>
-  )
+  return <BrowserRouter><Routes><Route element={<Shell />}>
+    <Route index element={<Navigate to="/create" replace />} />
+    <Route path="/accounts" element={<AccountsPage />} />
+    <Route path="/materials" element={<MaterialsPage />} />
+    <Route path="/create" element={<CreatePage />} />
+    <Route path="/create/:accountId/:workflowId" element={<CreatePage />} />
+    <Route path="/works" element={<WorksPage />} />
+    <Route path="/migration" element={<MigrationPage />} />
+    <Route path="/workspace" element={<Navigate to="/create" replace />} />
+    <Route path="/material-bank" element={<Navigate to="/materials" replace />} />
+    <Route path="/knowledge-base" element={<Navigate to="/works" replace />} />
+    <Route path="*" element={<Navigate to="/create" replace />} />
+  </Route></Routes></BrowserRouter>
 }
-

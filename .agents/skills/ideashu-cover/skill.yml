@@ -1,0 +1,6 @@
+name: ideashu-cover
+version: 1.0.0
+description: Generate text-free backgrounds and editable Chinese IdeaShu covers.
+entrypoint: SKILL.md
+requires:
+  mcp_servers: [ideashu]

@@ -1,0 +1,20 @@
+{
+  "name": "@ideashu/server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13 <23"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "lint": "node --check src/index.js && node --check src/domain.js && node --check src/mcp.js",
+    "test": "node --test test/*.test.js",
+    "test:integration": "node --test test/integration/*.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "express": "^5.1.0",
+    "zod": "^4.0.0"
+  }
+}

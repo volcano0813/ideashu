@@ -1,0 +1,6 @@
+name: ideashu-create
+version: 1.0.0
+description: Create sourced, account-scoped IdeaShu workflows and draft revisions.
+entrypoint: SKILL.md
+requires:
+  mcp_servers: [ideashu]

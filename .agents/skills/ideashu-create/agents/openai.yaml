@@ -1,0 +1,4 @@
+interface:
+  display_name: "IdeaShu Create"
+  short_description: "Create sourced, account-scoped IdeaShu drafts"
+  default_prompt: "Use $ideashu-create to create a sourced IdeaShu workflow for the selected account."
