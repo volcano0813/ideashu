@@ -1,5 +1,6 @@
 import { ensureRuntime, repoRoot } from './config.js'
 import { openDatabase } from './db.js'
+import { fileURLToPath } from 'node:url'
 
 const [major, minor] = process.versions.node.split('.').map(Number)
 if (major !== 22 || minor < 13) {
@@ -12,4 +13,4 @@ const db = openDatabase(paths.database)
 db.close()
 console.log('IdeaShu local runtime initialized.')
 console.log('Start: npm start')
-console.log('Codex/WorkBuddy MCP command: node ' + JSON.stringify(new URL('./mcp.js', import.meta.url).pathname.replace(/^\/(?:[A-Za-z]:)/, (value) => value.slice(1))))
+console.log('Codex/WorkBuddy MCP command: node ' + JSON.stringify(fileURLToPath(new URL('./mcp.js', import.meta.url))))
