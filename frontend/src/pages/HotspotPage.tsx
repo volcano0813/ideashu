@@ -292,9 +292,6 @@ export default function HotspotPage() {
           <div className="mb-4 flex items-end justify-between gap-4">
             <div>
               <div className="text-2xl font-black text-text-main">热点抓取</div>
-              <div className="mt-1 text-[13px] font-semibold text-text-tertiary">
-                每次 5～8 条 · heatScore≥50 · 多源检索 · 须与当前 TopNav 账号领域一致 · sourceUrl 真实或可空 · 按热度排序
-              </div>
             </div>
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-2 rounded-full border border-border-muted bg-surface px-3 py-1.5">

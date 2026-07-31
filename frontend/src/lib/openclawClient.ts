@@ -106,15 +106,86 @@ export function filterTrendSignalsForHotspotUi(signals: TrendSignal[]): TrendSig
   return filterTrendSignalsWithTraceableUrl(signals).filter((s) => !isHotspotMetaLimitationSignal(s))
 }
 
+/**
+ * 列表/JSON 常在标题末尾附带「（热度：90）」；卡片主标题不应展示。仅去掉**行尾**一段，保留「3. xxx」等编号。
+ */
+function stripTrailingHeatSuffixFromHotspotTitle(t: string): string {
+  let s = t.trimEnd()
+  const re = /\s*[（(]\s*热度\s*[:：]\s*\d+\s*[）)]\s*$/u
+  for (let i = 0; i < 8; i++) {
+    const next = s.replace(re, '').trimEnd()
+    if (next === s) break
+    s = next
+  }
+  return s.trim()
+}
+
+function deriveShortHotspotTitleFromAngleBody(body: string): string {
+  const s = body.trim().replace(/\s+/g, ' ')
+  if (!s) return '热点方向'
+  const cutAt = (idx: number) => s.slice(0, idx + 1).trim()
+
+  const punct = ['。', '！', '？', '!', '?'] as const
+  for (const p of punct) {
+    const i = s.indexOf(p)
+    if (i >= 8) return cutAt(i)
+  }
+
+  const commaIdx = s.indexOf('，')
+  if (commaIdx >= 8) return s.slice(0, commaIdx).trim()
+
+  if (s.length <= 52) return s
+  return `${s.slice(0, 36).trim()}…`
+}
+
+const SUGGESTED_ANGLE_PREFIX_RE = /^建议(?:角度|切入)[：:]\s*(.+)$/su
+
+function redistributeSuggestedAngleFromTitle(sig: TrendSignal): TrendSignal {
+  const rawTitle = String(sig.title ?? '').trim()
+  const m = rawTitle.match(SUGGESTED_ANGLE_PREFIX_RE)
+  if (!m?.[1]) return sig
+
+  const angleBody = String(m[1]).trim()
+  if (!angleBody) return sig
+
+  const derivedTitle = deriveShortHotspotTitleFromAngleBody(angleBody)
+  const existingAngle = typeof sig.angle === 'string' ? sig.angle.trim() : ''
+  const nextAngle = existingAngle ? `${existingAngle}\n${angleBody}` : angleBody
+
+  const angles = Array.isArray(sig.suggestedAngles) ? sig.suggestedAngles.map((x) => String(x)) : []
+  const suggestedAngles =
+    angles.length > 0 ? [angleBody, ...angles.filter((a) => a.trim() && a.trim() !== angleBody)] : [angleBody]
+
+  return {
+    ...sig,
+    title: derivedTitle,
+    keyword: derivedTitle,
+    angle: nextAngle,
+    suggestedAngles,
+  }
+}
+
+function trendSignalsWithStrippedHeatTitles(signals: TrendSignal[]): TrendSignal[] {
+  return signals.map((sig) => {
+    const title = stripTrailingHeatSuffixFromHotspotTitle(String(sig.title ?? ''))
+    const kwRaw = String(sig.keyword ?? sig.title ?? '').trim()
+    const keyword = stripTrailingHeatSuffixFromHotspotTitle(kwRaw)
+    return redistributeSuggestedAngleFromTitle({ ...sig, title, keyword })
+  })
+}
+
 function finishTopicsWithTraceableFilter(norm: TrendSignal[] | null): TrendSignal[] | null {
   if (!norm || norm.length === 0) return null
-  const strict = filterTrendSignalsForHotspotUi(norm)
+  const stripped = trendSignalsWithStrippedHeatTitles(norm)
+  const withoutNoise = stripped.filter((s) => !isNoiseHotspotTitle(String(s.title ?? '')))
+  if (withoutNoise.length === 0) return null
+  const strict = filterTrendSignalsForHotspotUi(withoutNoise)
   if (strict.length > 0) return strict
   // 助手常漏填 sourceUrl：宁可展示无链接卡片（HotCard 内提示补链），也不要整页失败
-  const relaxed = norm.filter((s) => !isHotspotMetaLimitationSignal(s))
+  const relaxed = withoutNoise.filter((s) => !isHotspotMetaLimitationSignal(s))
   if (relaxed.length > 0) return relaxed
   // 若每条都被判为「限制说明」等（正则误判常见），仍返回原始列表，避免控制台已解析出 topics 但 UI 整页失败
-  return norm
+  return withoutNoise
 }
 
 export type StyleRule = {
@@ -589,6 +660,7 @@ function parseMarkdownHotspotTable(text: string): unknown[] | null {
     const cells = filtered[r]!
     const title = (cells[titleIdx] ?? cells[0] ?? '').trim()
     if (!title || /^[:：\-—|｜\s]+$/.test(title)) continue
+    if (isNoiseHotspotTitle(title)) continue
     const hook = hookIdx >= 0 ? (cells[hookIdx] ?? '').trim() : ''
     const why = whyIdx >= 0 ? (cells[whyIdx] ?? '').trim() : ''
     const angles = [hook, why].filter((s) => s.length > 0)
@@ -609,6 +681,9 @@ function parseMarkdownHotspotTable(text: string): unknown[] | null {
 function isNoiseHotspotTitle(t: string): boolean {
   const s = t.replace(/\*\*/g, '').trim()
   if (s.length < 2 || s.length > 100) return true
+  // 元数据行误当成选题（松散列表 / JSON title 误填）
+  if (/^(来源|数据源|检索来源|参考资料|参考来源)[：:\s]/u.test(s)) return true
+  if (/^Source\s*:/i.test(s)) return true
   if (/请告诉我|请直接|我不再回复|继续重复同样|^\d+\s*[.)）]\s*请/.test(s)) return true
   if (/你不需要更多|不需要更多[「"]找热点/.test(s)) return true
   if (/^请选|^点选|^下一步|^告诉我\s*(现在)?$/.test(s)) return true
@@ -635,6 +710,31 @@ function parseLooseHotspotList(text: string): unknown[] | null {
     const key = t.replace(/\s+/g, ' ')
     if (seen.has(key)) return
     seen.add(key)
+    const m = t.match(SUGGESTED_ANGLE_PREFIX_RE)
+    if (m?.[1]) {
+      const angleBody = String(m[1]).trim()
+      if (angleBody) {
+        const shortTitle = deriveShortHotspotTitleFromAngleBody(angleBody)
+        out.push({
+          id: `topic_${out.length}`,
+          title: shortTitle,
+          keyword: shortTitle,
+          source: '综合',
+          sourceUrl: '',
+          angle: angleBody,
+          hook: '',
+          heatScore: 62,
+          timing: 'hot',
+          timingDetail: '',
+          materialMatch: false,
+          materialCount: 0,
+          lifecycle: 'hot' as const,
+          sources: [{ platform: '助手摘要', metrics: '文本抽取' }],
+          suggestedAngles: [angleBody, '补一条真实体验'],
+        })
+        return
+      }
+    }
     out.push({
       id: `topic_${out.length}`,
       title: t,
@@ -1263,7 +1363,11 @@ export function createOpenClawClient({
     eventListeners.forEach((cb) => cb(evt))
   }
 
-  /** Full assistant reply text: agent chunks append `payload.data.text`; chat + `message` flushes and parses ```json:*``` blocks. */
+  /**
+   * Full assistant reply text: `agent` chunks and `chat` snapshots both merge into this buffer via
+   * `mergeStreamTextChunk`. Incremental parse uses `parseCompleteAssistantTextFromPayload` (no drain).
+   * The buffer is cleared only on idle flush or `tryFlushAgentBufferIfTopicsFenceComplete` (topics fence complete).
+   */
   let messageBuffer = ''
   /** First non-empty merged byte time for current agent stream segment (reset when buffer drained). */
   let agentStreamFirstChunkAt: number | null = null
@@ -1921,10 +2025,20 @@ export function createOpenClawClient({
             const hasMessage = p != null && typeof p === 'object' && 'message' in p && p.message != null
             if (hasMessage) {
               const fromChat = pickLongestAssistantTextFromChatPayload(payload)
-              if (fromChat.length > messageBuffer.length) {
-                messageBuffer = fromChat
+              if (fromChat.trim()) {
+                if (activeAssistantReplyId == null) {
+                  const derived = deriveReplyIdFromPayload(payload)
+                  activeAssistantReplyId =
+                    derived ?? `${sessionKey ?? 'nosession'}::fb_${fallbackAssistantReplySeq++}`
+                }
+                messageBuffer = mergeStreamTextChunk(messageBuffer, fromChat)
+                if (messageBuffer.trim().length > 0 && agentStreamFirstChunkAt == null) {
+                  agentStreamFirstChunkAt = Date.now()
+                }
+                parseCompleteAssistantTextFromPayload(messageBuffer, undefined, activeAssistantReplyId)
+                tryFlushAgentBufferIfTopicsFenceComplete()
+                scheduleAgentIdleFlush()
               }
-              parseAndEmitMessageBuffer('chat+message', activeAssistantReplyId)
             }
             if (debugAgentExtractLogged < 40) {
               debugAgentExtractLogged += 1
